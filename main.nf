@@ -310,19 +310,59 @@ workflow{
         ch_fasta_fai
     )
     gvcf_HaplotypeCaller = HaplotypeCaller.out.gvcf_HaplotypeCaller.groupTuple(by:[0, 1, 2])
-    if (params.no_gvcf) gvcf_HaplotypeCaller.close()
-    else gvcf_HaplotypeCaller = gvcf_HaplotypeCaller.dump(tag:'GVCF HaplotypeCaller')
-    GenotypeGVCFs(HaplotypeCaller.out.gvcf_GenotypeGVCFs,
-    ch_dbsnp,
+    // if (params.no_gvcf) gvcf_HaplotypeCaller.close()
+    // else gvcf_HaplotypeCaller = gvcf_HaplotypeCaller.dump(tag:'GVCF HaplotypeCaller')
+
+    // gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs.groupTuple(by:[2])
+    // gvcf_GenotypeGVCFs.dump(tag:'GVCF for GenotypeGVCFs')
+    mapped_gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs
+                                .map{idPatient, idSample, interval,gvcf ->
+                                [file(interval).baseName, interval, idPatient, idSample, gvcf]}
+    // mapped_gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs
+    //                             .map{idPatient, idSample, interval,gvcf ->
+    //                             [file(interval).name, idPatient, idSample,gvcf]}
+    // mapped_gvcf_GenotypeGVCFs.dump(tag: 'mapped GVCF for GenotypGVCFs')                                
+    mapped_gvcf_GenotypeGVCFs = mapped_gvcf_GenotypeGVCFs
+    .groupTuple(by:[0])
+    .map{interval_name, interval, idPatient, idSample, gvcf -> 
+        [interval_name, interval.first(), idPatient, idSample, gvcf]
+        }
+    // .dump(tag: 'groupTuple mapped GVCF for GenotypGVCFs')  
+    GenomicsDBImport(mapped_gvcf_GenotypeGVCFs)                              
+    GenotypeGVCFs(GenomicsDBImport.out,
+        ch_dbsnp,
         ch_dbsnp_index,
         ch_dict,
         ch_fasta,
         ch_fasta_fai
     )
-    vcf_ConcatenateVCFs = GenotypeGVCFs.out.vcf_GenotypeGVCFs.groupTuple(by:[0, 1, 2])
-    if (!params.noGVCF){ // if user specified, noGVCF, skip saving the GVCFs from HaplotypeCaller
-        vcf_ConcatenateVCFs = vcf_ConcatenateVCFs.mix(gvcf_HaplotypeCaller)
+
+    ch_select_variants = GenotypeGVCFs.out.vcf_GenotypeGVCFs
+    .flatMap{ caller, int_name, int_bed, li_id_patient, li_id_sample, vcf, vcf_idx ->
+        my_list=[]
+        li_id_patient.eachWithIndex { item, index ->
+            my_list.add([caller, li_id_patient[index], li_id_sample[index],  int_name, int_bed, vcf, vcf_idx])
+        }
+        my_list
     }
+    SelectVariants(ch_select_variants,
+        ch_fasta,
+        ch_fasta_fai,
+        ch_dict
+        )
+    vcf_ConcatenateVCFs = SelectVariants.out.vcf_SelectVariants.groupTuple(by:[0, 1, 2])
+    // .dump(tag: 'for SelctVariants')  
+    // GenotypeGVCFs(HaplotypeCaller.out.gvcf_GenotypeGVCFs,
+    // ch_dbsnp,
+    //     ch_dbsnp_index,
+    //     ch_dict,
+    //     ch_fasta,
+    //     ch_fasta_fai
+    // )
+    // vcf_ConcatenateVCFs = GenotypeGVCFs.out.vcf_GenotypeGVCFs.groupTuple(by:[0, 1, 2])
+    // if (!params.noGVCF){ // if user specified, noGVCF, skip saving the GVCFs from HaplotypeCaller
+    //     vcf_ConcatenateVCFs = vcf_ConcatenateVCFs.mix(gvcf_HaplotypeCaller)
+    // }
     
     ConcatVCF(vcf_ConcatenateVCFs,
         ch_fasta_fai,
@@ -347,35 +387,72 @@ workflow{
         ch_fasta,
         ch_fasta_fai
     )
-
-    ch_vcfs_to_annotate = Channel.empty()
+    // ch_vcfs_to_annotate = Channel.empty()
     if (step == 'annotate') {
-        ch_vcfs_to_annotate = getVCFsToAnnotate(params.outdir)
+        // ch_vcfs_to_annotate = getVCFsToAnnotate(params.outdir, annotate_tools)
+        ch_vcf_to_annotate = Channel.empty()
+        // vcf_no_annotate = Channel.empty()
+
+        if (tsvPath == [] || !tsvPath) {
+        // Sarek, by default, annotates all available vcfs that it can find in the VariantCalling directory
+        // Excluding vcfs from FreeBayes, and g.vcf from HaplotypeCaller
+        // Basically it's: results/VariantCalling/*/{HaplotypeCaller,Manta,Mutect2,SentieonDNAseq,SentieonDNAscope,SentieonTNscope,Strelka,TIDDIT}/*.vcf.gz
+        // Without *SmallIndels.vcf.gz from Manta, and *.genome.vcf.gz from Strelka
+        // The small snippet `vcf.minus(vcf.fileName)[-2]` catches idSample
+        // This field is used to output final annotated VCFs in the correct directory
+            // log.info ("annotate_tools: ${annotate_tools}")
+            ch_vcf_to_annotate = 
+            Channel.empty().mix(
+            Channel.fromPath("${params.outdir}/VariantCalling/*/HaplotypeCaller/*.vcf.gz")
+                .flatten().map{vcf -> ['HaplotypeCaller', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+            // Channel.fromPath("${params.outdir}/VariantCalling/*/Manta/*[!candidate]SV.vcf.gz")
+            Channel.fromPath("${params.outdir}/VariantCalling/*/Manta/*diploidSV.vcf.gz")
+                .flatten().map{vcf -> ['Manta', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+            Channel.fromPath("${params.outdir}/VariantCalling/*/Mutect2/*.vcf.gz")
+                .flatten().map{vcf -> ['Mutect2', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+            Channel.fromPath("${params.outdir}/VariantCalling/*/Strelka/*{somatic,variant}*.vcf.gz")
+                .flatten().map{vcf -> ['Strelka', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+            Channel.fromPath("${params.outdir}/VariantCalling/*/TIDDIT/*.vcf.gz")
+                .flatten().map{vcf -> ['TIDDIT', vcf.minus(vcf.fileName)[-2].toString(), vcf]}
+            )
+            .filter {
+                annotate_tools == [] || (annotate_tools != [] && it[0] in annotate_tools)
+            }
+        } else if (annotate_tools == []) {
+        // Annotate user-submitted VCFs
+        // If user-submitted, Sarek assume that the idSample should be assumed automatically
+        ch_vcf_to_annotate = Channel.fromPath(tsvPath)
+            .map{vcf -> ['userspecified', vcf.minus(vcf.fileName)[-2].toString(), vcf]}
+        } else exit 1, "specify only tools or files to annotate, not both"
     }
+    
+    // log.info "annotate_tools: ${annotate_tools}"
+    // ch_vcf_to_annotate.dump(tag: 'ch_vcf_to_annotate')
+    // ch_vcfs_to_annotate = ch_vcfs_to_annotate.mix(
+    //                       ConcatVCF.out.vcf_concatenated_to_annotate,
+    //                       StrelkaSingle.out.map{
+    //                            variantcaller, idPatient, idSample, vcf, tbi ->
+    //                             [variantcaller, idSample, vcf[1]]
+    //                       },
+    //                        MantaSingle.out.map {
+    //                         variantcaller, idPatient, idSample, vcf, tbi ->
+    //                         [variantcaller, idSample, vcf[2]]
+    //                     },
+    //                     TIDDIT.out.vcfTIDDIT.map {
+    //                         variantcaller, idPatient, idSample, vcf, tbi ->
+    //                         [variantcaller, idSample, vcf]
+    //                         }
+    //                     )
 
-    ch_vcfs_to_annotate = ch_vcfs_to_annotate.mix(
-                          ConcatVCF.out.vcf_concatenated_to_annotate,
-                          StrelkaSingle.out.map{
-                               variantcaller, idPatient, idSample, vcf, tbi ->
-                                [variantcaller, idSample, vcf[1]]
-                          },
-                           MantaSingle.out.map {
-                            variantcaller, idPatient, idSample, vcf, tbi ->
-                            [variantcaller, idSample, vcf[2]]
-                        },
-                        TIDDIT.out.vcfTIDDIT.map {
-                            variantcaller, idPatient, idSample, vcf, tbi ->
-                            [variantcaller, idSample, vcf]
-                            }
-                        )
-
-    ch_vcf_snpEff = ch_vcfs_to_annotate.mix(ConcatVCF.out.vcf_concatenated_to_annotate)
+    // ch_vcf_snpEff = ch_vcfs_to_annotate.mix(ConcatVCF.out.vcf_concatenated_to_annotate)
+    ch_vcf_snpEff = ch_vcf_to_annotate
+    // ch_vcf_snpEff = Channel.empty()
 
    ch_vcf_vep = ch_vcf_snpEff.map {
             variantCaller, idSample, vcf ->
             [variantCaller, idSample, vcf, null]
     }
-    // PrintCh(ch_vcf_snpeff)
+//     // PrintCh(ch_vcf_snpeff)
     SnpEff( ch_vcf_snpEff,
             ch_snpEff_cache,
             ch_snpEff_db
@@ -1313,7 +1390,8 @@ process HaplotypeCaller {
     output:
         tuple val("HaplotypeCallerGVCF"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_HaplotypeCaller
         tuple idPatient, idSample, file(intervalBed), file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_GenotypeGVCFs
-        // tuple idPatient, idSample, file("${idSample}.g.vcf")
+        // tuple val("${intervalBed.baseName}"), idPatient, idSample, file(intervalBed), file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_GenotypeGVCFs
+        
 
     when: 'haplotypecaller' in tools
 
@@ -1323,21 +1401,94 @@ process HaplotypeCaller {
         HaplotypeCaller \
         -R ${fasta} \
         -I ${bam} \
-         -L ${intervalBed} \
+        -L ${intervalBed} \
         -D ${dbsnp} \
         -O ${intervalBed.baseName}_${idSample}.g.vcf \
         -ERC GVCF
     """
 }
+// STEP GATK HAPLOTYPECALLER.1.5
+process GenomicsDBImport {
+    label 'cpus_16'
+    echo true
+    // publishDir "${OUT_DIR}/misc/genomicsdb/", mode: 'copy', overwrite: false
 
+    input:
+    tuple val(interval_name), file(interval_bed), val(list_id_patient), val(list_id_sample), file(gvcfs)
+    
+    output:
+    tuple val(interval_name), file(interval_bed), val(list_id_patient), val(list_id_sample), file ("${interval_name}.gdb")
+
+    when: 'haplotypecaller' in tools
+
+    script:
+    sample_map="cohort_samples.map"
+    // gDB = chr
+    """
+    for x in *.g.vcf
+    do
+        bgzip \$x
+        tabix \${x}.gz
+    done
+
+    for x in *.g.vcf.gz
+    do
+        
+        base_name=`basename \$x`
+        sample_with_ext=\${base_name##*_}
+        sample=\${sample_with_ext%%.*}
+        echo "\${sample}\t\${x}" >> ${sample_map}
+    done
+    
+    gatk --java-options -Xmx${task.memory.toGiga()}g \
+    GenomicsDBImport \
+    --genomicsdb-workspace-path ${interval_name}.gdb \
+    -L $interval_bed \
+    --sample-name-map ${sample_map} \
+    --reader-threads ${task.cpus}
+
+    """
+}
 
 // STEP GATK HAPLOTYPECALLER.2
 
-process GenotypeGVCFs {
-    tag {idSample + "-" + intervalBed.baseName}
+// process GenotypeGVCFs {
+//     tag {idSample + "-" + intervalBed.baseName}
 
+//     input:
+//         tuple idPatient, idSample, file(intervalBed), file(gvcf)
+//         file(dbsnp)
+//         file(dbsnpIndex)
+//         file(dict)
+//         file(fasta)
+//         file(fastaFai)
+
+//     output:
+//     tuple val("HaplotypeCaller"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.vcf"), emit: vcf_GenotypeGVCFs
+
+//     when: 'haplotypecaller' in tools
+
+//     script:
+//     // Using -L is important for speed and we have to index the interval files also
+//     """
+//     gatk --java-options -Xmx${task.memory.toGiga()}g \
+//         IndexFeatureFile -I ${gvcf}
+
+//     gatk --java-options -Xmx${task.memory.toGiga()}g \
+//         GenotypeGVCFs \
+//         -R ${fasta} \
+//         -L ${intervalBed} \
+//         -D ${dbsnp} \
+//         -V ${gvcf} \
+//         -O ${intervalBed.baseName}_${idSample}.vcf
+//     """
+// }
+
+process GenotypeGVCFs {
+    label 'cpus_8'
+    tag {interval_bed.baseName}
     input:
-        tuple idPatient, idSample, file(intervalBed), file(gvcf)
+        tuple val(interval_name), file(interval_bed), val(list_id_patient), val(list_id_sample), file(gdb)
         file(dbsnp)
         file(dbsnpIndex)
         file(dict)
@@ -1345,23 +1496,51 @@ process GenotypeGVCFs {
         file(fastaFai)
 
     output:
-    tuple val("HaplotypeCaller"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.vcf"), emit: vcf_GenotypeGVCFs
-
+    // tuple val("HaplotypeCaller"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.vcf"), emit: vcf_GenotypeGVCFs
+    tuple val("HaplotypeCaller"), val(interval_name), file(interval_bed), val(list_id_patient), val(list_id_sample), file ("${interval_name}.vcf"), file ("${interval_name}.vcf.idx"), emit: vcf_GenotypeGVCFs
+    
     when: 'haplotypecaller' in tools
 
     script:
     // Using -L is important for speed and we have to index the interval files also
     """
     gatk --java-options -Xmx${task.memory.toGiga()}g \
-        IndexFeatureFile -I ${gvcf}
-
-    gatk --java-options -Xmx${task.memory.toGiga()}g \
         GenotypeGVCFs \
         -R ${fasta} \
-        -L ${intervalBed} \
+        -L ${interval_bed} \
         -D ${dbsnp} \
-        -V ${gvcf} \
-        -O ${intervalBed.baseName}_${idSample}.vcf
+        -V gendb://${gdb} \
+        --create-output-variant-index \
+        -O "${interval_name}.vcf"
+    """
+}
+
+process SelectVariants {
+    label 'cpus_8'
+    tag {interval_bed.baseName}
+    input:
+        tuple val(caller), val(id_patient), val(id_sample), val(interval_name), file(interval_bed), file (vcf), file (vcf_idx)
+        file(fasta)
+        file(fastaFai)
+        file(dict)
+
+    output:
+    // tuple val("HaplotypeCaller"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.vcf"), emit: vcf_GenotypeGVCFs
+    // tuple val("HaplotypeCaller"), val(interval_name), file(interval_bed), val(list_id_patient), val(list_id_sample), file ("${interval_name}.vcf"), file ("${interval_name}.vcf.idx"), emit: vcf_GenotypeGVCFs
+    tuple val("HaplotypeCaller"), id_patient, id_sample, file("${interval_bed.baseName}_${id_sample}.vcf"), emit: vcf_SelectVariants
+    
+    when: 'haplotypecaller' in tools
+
+    script:
+    // Using -L is important for speed and we have to index the interval files also
+    """
+    gatk --java-options -Xmx${task.memory.toGiga()}g \
+            SelectVariants \
+            -R ${fasta} \
+            -L ${interval_bed} \
+            -V ${vcf} \
+            -O ${interval_bed.baseName}_${id_sample}.vcf \
+            -sn ${id_sample}
     """
 }
 
@@ -2227,7 +2406,7 @@ def returnStatus(it) {
     return it
 }
 // getvcfs to annotate
-def getVCFsToAnnotate(results_dir){
+def getVCFsToAnnotate(results_dir, annotate_tools, tsv){
     vcf_to_annotate = Channel.empty()
     // vcf_no_annotate = Channel.empty()
 
@@ -2238,27 +2417,23 @@ def getVCFsToAnnotate(results_dir){
     // Without *SmallIndels.vcf.gz from Manta, and *.genome.vcf.gz from Strelka
     // The small snippet `vcf.minus(vcf.fileName)[-2]` catches idSample
     // This field is used to output final annotated VCFs in the correct directory
-    
-    Channel.empty().mix(
-    Channel.fromPath("${results_dir}/VariantCalling/*/HaplotypeCaller/*.vcf.gz")
-        .flatten().map{vcf -> ['HaplotypeCaller', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
-    Channel.fromPath("${results_dir}/VariantCalling/*/Manta/*[!candidate]SV.vcf.gz")
-        .flatten().map{vcf -> ['Manta', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
-    Channel.fromPath("${results_dir}/VariantCalling/*/Mutect2/*.vcf.gz")
-        .flatten().map{vcf -> ['Mutect2', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
-    Channel.fromPath("${results_dir}/VariantCalling/*/SentieonDNAseq/*.vcf.gz")
-        .flatten().map{vcf -> ['SentieonDNAseq', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
-    Channel.fromPath("${results_dir}/VariantCalling/*/SentieonDNAscope/*.vcf.gz")
-        .flatten().map{vcf -> ['SentieonDNAscope', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
-    Channel.fromPath("${results_dir}/VariantCalling/*/SentieonTNscope/*.vcf.gz")
-        .flatten().map{vcf -> ['SentieonTNscope', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
-    Channel.fromPath("${results_dir}/VariantCalling/*/Strelka/*{somatic,variant}*.vcf.gz")
-        .flatten().map{vcf -> ['Strelka', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
-    Channel.fromPath("${results_dir}/VariantCalling/*/TIDDIT/*.vcf.gz")
-        .flatten().map{vcf -> ['TIDDIT', vcf.minus(vcf.fileName)[-2].toString(), vcf]}
-    ).filter {
-        annotate_tools == [] || (annotate_tools != [] && it[0] in annotate_tools)
-    }.set{vcf_to_annotate}
+        println("annotate_tools: ${annotate_tools}")
+        vcf_to_ann = 
+        Channel.empty().mix(
+        Channel.fromPath("${results_dir}/VariantCalling/*/HaplotypeCaller/*.vcf.gz")
+            .flatten().map{vcf -> ['HaplotypeCaller', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+        Channel.fromPath("${results_dir}/VariantCalling/*/Manta/*[!candidate]SV.vcf.gz")
+            .flatten().map{vcf -> ['Manta', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+        Channel.fromPath("${results_dir}/VariantCalling/*/Mutect2/*.vcf.gz")
+            .flatten().map{vcf -> ['Mutect2', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+        Channel.fromPath("${results_dir}/VariantCalling/*/Strelka/*{somatic,variant}*.vcf.gz")
+            .flatten().map{vcf -> ['Strelka', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+        Channel.fromPath("${results_dir}/VariantCalling/*/TIDDIT/*.vcf.gz")
+            .flatten().map{vcf -> ['TIDDIT', vcf.minus(vcf.fileName)[-2].toString(), vcf]}
+        )
+        .filter {
+            annotate_tools == [] || (annotate_tools != [] && it[0] in annotate_tools)
+        }
     } else if (annotate_tools == []) {
     // Annotate user-submitted VCFs
     // If user-submitted, Sarek assume that the idSample should be assumed automatically
