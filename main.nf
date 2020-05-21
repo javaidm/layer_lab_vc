@@ -30,9 +30,10 @@ skipQClist = defineSkipQClist()
 skipQC = params.skip_qc ? params.skip_qc == 'all' ? skipQClist : params.skip_qc.split(',').collect{it.trim().toLowerCase()} : []
 if (!checkParameterList(skipQC, skipQClist)) exit 1, 'Unknown QC tool(s), see --help for more information'
 
-annoList = defineAnnoList()
-annotateTools = params.annotate_tools ? params.annotateTools.split(',').collect{it.trim().toLowerCase()} : []
-if (!checkParameterList(annotateTools,annoList)) exit 1, 'Unknown tool(s) to annotate, see --help for more information'
+anno_list = defineAnnoList()
+// annotate_tools = params.annotate_tools ? params.annotate_tools.split(',').collect{it.trim().toLowerCase()} : []
+annotate_tools = params.annotate_tools ? params.annotate_tools.split(',').collect{it.trim()} : []
+if (!checkParameterList(annotate_tools,anno_list)) exit 1, "Unknown tool(s) (${annotate_tools}) to annotate, see --help for more information"
 
 // Has the run name been specified by the user?
 // This has the bonus effect of catching both -name and --name
@@ -93,7 +94,7 @@ params.known_indels_index = params.genome && params.known_indels ? params.genome
 // ch_dbsnp = params.dbsnp && ('mapping' in step || 'controlfreec' in tools || 'haplotypecaller' in tools || 'mutect2' in tools) ? Channel.value(file(params.dbsnp)) : "null"
 
 ch_acLoci = params.ac_loci && 'ascat' in tools ? Channel.value(file(params.ac_loci)) : "null"
-ch_acLociGC = params.ac_lociGC && 'ascat' in tools ? Channel.value(file(params.ac_lociGC)) : "null"
+ch_acLoci_GC = params.ac_loci_GC && 'ascat' in tools ? Channel.value(file(params.ac_loci_GC)) : "null"
 ch_chrDir = params.chr_dir && 'controlfreec' in tools ? Channel.value(file(params.chr_dir)) : "null"
 ch_chrLength = params.chr_length && 'controlfreec' in tools ? Channel.value(file(params.chr_length)) : "null"
 ch_dbsnp = params.dbsnp && ('mapping' in step || 'controlfreec' in tools || 'haplotypecaller' in tools || 'mutect2' in tools) ? Channel.value(file(params.dbsnp)) : "null"
@@ -107,15 +108,37 @@ ch_germline_resource = params.germline_resource && 'mutect2' in tools ? Channel.
 ch_intervals = params.intervals && !params.no_intervals && !('annotate' in step) ? Channel.value(file(params.intervals)) : "null"
 ch_pon = params.pon ? Channel.value(file(params.pon)) : "null"
 ch_target_bed = params.target_bed ? Channel.value(file(params.target_bed)) : "null"
+ch_bait_bed = params.bait_bed ? Channel.value(file(params.bait_bed)) : "null"
 // knownIndels is currently a list of file for smallGRCh37, so transform it in a channel
-li_knownIndels = []
-if (params.known_indels && ('mapping' in step)) params.known_indels.each { li_knownIndels.add(file(it)) }
-li_knownIndelsIndex = []
-if (params.known_indels_index && ('mapping' in step)) params.known_indels_index.each { li_knownIndelsIndex.add(file(it)) }
-ch_known_indels = params.known_indels && params.genome == 'smallGRCh37' ? Channel.value(li_knownIndels.collect()) : params.known_indels ? Channel.value(file(params.known_indels)) : "null"
-// ch_known_indels_index = params.known_indels_index && params.genome == 'smallGRCh37' ? Channel.value(li_knownIndelsIndex.collect()) : params.known_indels_index ? Channel.value(file(params.known_indels_index)) : "null"
-// ch_bwa_index = params.bwa_index ? Channel.value(file(params.bwa_index)) : Channel.empty()
-// ch_bwa_index = params.bwa_index ? Channel.fromPath(params.bwa_index) : Channel.empty()
+li_known_indels = []
+if (params.known_indels && ('mapping' in step)) params.known_indels.each { li_known_indels.add(file(it)) }
+
+li_known_indels_index = []
+if (params.known_indels_index && ('mapping' in step)) params.known_indels_index.each { li_known_indels_index.add(file(it)) }
+// ch_known_indels = Channel.empty()
+// ch_known_indels_index = Channel.empty()
+ch_known_indels = params.known_indels && params.genome == 'smallGRCh37' \
+    ? Channel.value(li_known_indels.collect()) \
+    : \
+    params.known_indels ? Channel.value(file(params.known_indels)) : "null"
+
+ch_known_indels_index = params.known_indels_index && params.genome == 'smallGRCh37' \
+    ? Channel.value(li_known_indels_index.collect()) \
+    : \
+    params.known_indels_index ? Channel.value(file(params.known_indels_index)) : "null"
+
+ch_snpEff_cache = params.snpEff_cache ? Channel.value(file(params.snpEff_cache)) : "null"
+// ch_snpeff_cache = params.snpeff_cache ? Channel.fromPath(params.snpeff_cache) : "null"
+ch_snpEff_db = params.snpEff_db ? Channel.value(params.snpEff_db) : "null"
+
+
+ch_vep_cache_version = params.vep_cache_version ? Channel.value(params.vep_cache_version) : "null"
+ch_vep_cache = params.vep_cache ? Channel.value(file(params.vep_cache)) : "null"
+// Optional files, not defined within the params.genomes[params.genome] scope
+ch_cadd_InDels = params.cadd_InDels ? Channel.value(file(params.cadd_InDels)) : "null"
+ch_cadd_InDels_tbi = params.cadd_InDels_tbi ? Channel.value(file(params.cadd_InDels_tbi)) : "null"
+ch_cadd_WG_SNVs = params.cadd_WG_SNVs ? Channel.value(file(params.cadd_WG_SNVs)) : "null"
+ch_cadd_WG_SNVs_tbi = params.cadd_WG_SNVs_tbi ? Channel.value(file(params.cadd_WG_SNVs_tbi)) : "null"
 
 printSummary()
 
@@ -144,6 +167,8 @@ printSummary()
 //     subscribe{println (it)}
 // }
 workflow{
+
+    GetSoftwareVersions()
     // First check if various indexes are provided, if not, create them
     BuildFastaFai(ch_fasta)
     BuildBWAindexes(ch_fasta)
@@ -164,11 +189,9 @@ workflow{
     ch_germline_resource_index = params.germline_resource ? \
         params.germline_resource_index ? Channel.value(file(params.germline_resource_index)) :BuildGermlineResourceIndex.out \
         : "null"
-    // ch_known_indels_index = params.known_indels ? \
-    //     params.known_indels_index ? Channel.value(file(params.known_indels_index)) : BuildKnownIndelsIndex.out.collect() \
-    //     : "null"
+    
     ch_known_indels_index = params.known_indels ? \
-        params.known_indels_index ? Channel.value(li_knownIndelsIndex.collect()) : BuildKnownIndelsIndex.out.collect() \
+        params.known_indels_index ? ch_known_indels_index : BuildKnownIndelsIndex.out.collect() \
         : "null"
     
     // ch_known_indels_index = params.known_indels_index && params.genome == 'smallGRCh37' ? Channel.value(li_knownIndelsIndex.collect()) : params.known_indels_index ? Channel.value(file(params.known_indels_index)) : "null"
@@ -184,12 +207,7 @@ workflow{
                             CreateIntervalBeds.out.flatten() )
     
     if (params.no_intervals && step != 'annotate') bedIntervals = Channel.from(file("no_intervals.bed"))
-    // ch_bed_intervals.subscribe{println(it)}
-    
-    // ch_input_sample
-    // .subscribe{println(it)}
-    // FastQCFQ(ch_input_sample)
-
+    FastQCFQ(ch_input_sample)
     MapReads(ch_input_sample, 
             ch_bwa_index, 
             ch_fasta, 
@@ -199,8 +217,8 @@ workflow{
     (ch_single_bams, ch_multiple_bams) = 
     MapReads.out.bam_mapped.groupTuple(by:[0, 1])
     .branch{
-        single: it[2].size() == 1
-        multiple: it[2].size() > 1
+         _: it[2].size() == 1
+        __: it[2].size() > 1
     }
 
     // // ch_multiple_bams.subscribe{ println it}
@@ -210,19 +228,18 @@ workflow{
     }
     MergeBamMapped(ch_multiple_bams)
     ch_merged_bams = MergeBamMapped.out.mix(ch_single_bams)
+    // bam_BamQC = bam_recal_qc.mix(MapReads.out.bam_mapped_BamQC)
+    // // bam_BamQC
+    // // .subscribe{ log.info(it)}
+    // BamQC(bam_BamQC,
+    //         ch_target_bed)
     IndexBamFile(ch_merged_bams)
     MarkDuplicates(ch_merged_bams)
-    
-    // TestBaseRecalibrator(MarkDuplicates.out.marked_bams.collect().combine(ch_bed_intervals),
-    //     ch_dbsnp,
-    //     ch_dbsnp_index,
-    //     ch_fasta,
-    //     ch_dict,
-    //     ch_fasta_fai,
-    //     ch_known_indels,
-    //     ch_known_indels_index
-    // )
-    BaseRecalibrator(MarkDuplicates.out.marked_bams.combine(ch_bed_intervals),
+    // Sambamba_MD(ch_merged_bams)
+    md_bams = MarkDuplicates.out.marked_bams.combine(ch_bed_intervals)
+    // md_bams = Sambamba_MD.out.combine(ch_bed_intervals)
+
+    BaseRecalibrator(md_bams,
         ch_dbsnp,
         ch_dbsnp_index,
         ch_fasta,
@@ -231,11 +248,16 @@ workflow{
         ch_known_indels,
         ch_known_indels_index
     )
+
     table_gather_bqsr_reports = 
         !params.no_intervals ? BaseRecalibrator.out.groupTuple(by:[0, 1]) : BaseRecalibrator.out
     GatherBQSRReports(table_gather_bqsr_reports)
+    
     bam_apply_bqsr = MarkDuplicates.out.marked_bams
                     .join(GatherBQSRReports.out.recal_table, by:[0,1])
+    // bam_apply_bqsr = Sambamba_MD.out
+    //                 .join(GatherBQSRReports.out.recal_table, by:[0,1])
+
     bam_apply_bqsr = bam_apply_bqsr.combine(ch_bed_intervals)
     ApplyBQSR(
         bam_apply_bqsr,
@@ -250,13 +272,34 @@ workflow{
     IndexBamRecal(bam_merge_bam_recal)
     bam_recal = MergeBamRecal.out.bam_recal.mix(IndexBamRecal.out.bam_recal)
     bam_recal_qc = MergeBamRecal.out.bam_recal_qc.mix(IndexBamRecal.out.bam_recal_qc)
+    
+    // idPatient = 'S12'
+    // idSample = 'GIAB'
+    // bam_recal = Channel.from(
+    //                         [idPatient,
+    //                          idSample, 
+    //                         file("${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam"),
+    //                         file("${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam.bai")
+    //                         ]
+    //                         )
+    
+    // bam_recal_qc = Channel.from(
+    //                         [idPatient,
+    //                          idSample, 
+    //                         file("${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam")                            
+    //                         ]
+    //                         )
 
     SamtoolsStats(bam_recal_qc)
-    bam_BamQC = bam_recal_qc.mix(MapReads.out.bam_mapped_BamQC)
-    // bam_BamQC
-    // .subscribe{ log.info(it)}
-    // BamQC(bam_BamQC,
-    //         ch_target_bed)
+    CollectHsMetrics(
+        bam_recal_qc,
+        ch_target_bed,
+        ch_bait_bed,
+        ch_fasta,
+        ch_fasta_fai,
+        ch_dict
+    )
+
     bam_HaplotypeCaller = bam_recal.combine(ch_bed_intervals)
     
     HaplotypeCaller(bam_HaplotypeCaller,
@@ -268,7 +311,7 @@ workflow{
     )
     gvcf_HaplotypeCaller = HaplotypeCaller.out.gvcf_HaplotypeCaller.groupTuple(by:[0, 1, 2])
     if (params.no_gvcf) gvcf_HaplotypeCaller.close()
-    // else gvcf_HaplotypeCaller = gvcf_HaplotypeCaller.dump(tag:'GVCF HaplotypeCaller')
+    else gvcf_HaplotypeCaller = gvcf_HaplotypeCaller.dump(tag:'GVCF HaplotypeCaller')
     GenotypeGVCFs(HaplotypeCaller.out.gvcf_GenotypeGVCFs,
     ch_dbsnp,
         ch_dbsnp_index,
@@ -276,26 +319,106 @@ workflow{
         ch_fasta,
         ch_fasta_fai
     )
-    vcf_GenotypeGVCFs = GenotypeGVCFs.out.vcf_GenotypeGVCFs.groupTuple(by:[0, 1, 2])
-    // vcf_ConcatenateVCFs = mutect2Output.mix(vcfFreeBayes, vcfGenotypeGVCFs, gvcfHaplotypeCaller)
-    vcf_ConcatenateVCFs = vcf_GenotypeGVCFs.mix(gvcf_HaplotypeCaller)
+    vcf_ConcatenateVCFs = GenotypeGVCFs.out.vcf_GenotypeGVCFs.groupTuple(by:[0, 1, 2])
+    if (!params.noGVCF){ // if user specified, noGVCF, skip saving the GVCFs from HaplotypeCaller
+        vcf_ConcatenateVCFs = vcf_ConcatenateVCFs.mix(gvcf_HaplotypeCaller)
+    }
+    
     ConcatVCF(vcf_ConcatenateVCFs,
         ch_fasta_fai,
         ch_target_bed)
+
+    BcftoolsStats(ConcatVCF.out.vcf_concatenated_to_annotate)
+    Vcftools(ConcatVCF.out.vcf_concatenated_to_annotate)
+
+    StrelkaSingle(bam_recal,
+        ch_fasta,
+        ch_fasta_fai,
+        ch_target_bed
+    )
+
+    MantaSingle(bam_recal,
+        ch_fasta,
+        ch_fasta_fai,
+        ch_target_bed
+    )
+
+    TIDDIT(bam_recal,
+        ch_fasta,
+        ch_fasta_fai
+    )
+
+    ch_vcfs_to_annotate = Channel.empty()
+    if (step == 'annotate') {
+        ch_vcfs_to_annotate = getVCFsToAnnotate(params.outdir)
+    }
+
+    ch_vcfs_to_annotate = ch_vcfs_to_annotate.mix(
+                          ConcatVCF.out.vcf_concatenated_to_annotate,
+                          StrelkaSingle.out.map{
+                               variantcaller, idPatient, idSample, vcf, tbi ->
+                                [variantcaller, idSample, vcf[1]]
+                          },
+                           MantaSingle.out.map {
+                            variantcaller, idPatient, idSample, vcf, tbi ->
+                            [variantcaller, idSample, vcf[2]]
+                        },
+                        TIDDIT.out.vcfTIDDIT.map {
+                            variantcaller, idPatient, idSample, vcf, tbi ->
+                            [variantcaller, idSample, vcf]
+                            }
+                        )
+
+    ch_vcf_snpEff = ch_vcfs_to_annotate.mix(ConcatVCF.out.vcf_concatenated_to_annotate)
+
+   ch_vcf_vep = ch_vcf_snpEff.map {
+            variantCaller, idSample, vcf ->
+            [variantCaller, idSample, vcf, null]
+    }
+    // PrintCh(ch_vcf_snpeff)
+    SnpEff( ch_vcf_snpEff,
+            ch_snpEff_cache,
+            ch_snpEff_db
+            )
+    CompressVCFsnpEff(SnpEff.out.snpEff_vcf)
     
-    // StrelkaSingle(IndexBamRecal.out,
-    //     ch_fasta,
-    //     ch_fasta_fai,
-    //     ch_target_bed
-    // )
+    VEP(ch_vcf_vep,
+        ch_vep_cache,
+        ch_vep_cache_version,
+        ch_cadd_InDels,
+        ch_cadd_InDels_tbi,
+        ch_cadd_WG_SNVs,
+        ch_cadd_WG_SNVs_tbi,
+        ch_fasta,
+        ch_fasta_fai
+    )
 
-    // MantaSingle(IndexBamRecal.out,
-    //     ch_fasta,
-    //     ch_fasta_fai,
-    //     ch_target_bed
-    // )
-
-   
+    VEPmerge(CompressVCFsnpEff.out.compressVCFsnpEffOut,
+        ch_vep_cache,
+        ch_vep_cache_version,
+        ch_cadd_InDels,
+        ch_cadd_InDels_tbi,
+        ch_cadd_WG_SNVs,
+        ch_cadd_WG_SNVs_tbi,
+        ch_fasta,
+        ch_fasta_fai
+    )
+    CompressVCFvep(VEP.out.vep_vcf.mix(
+                    VEPmerge.out.vep_vcf_merge)
+                    )
+    
+    MultiQC(
+        // Channel.value(params.multiqc_config ? file(params.multiqc_config) : ""),
+        Channel.value(""),
+        GetSoftwareVersions.out,
+        BcftoolsStats.out,
+        FastQCFQ.out,
+        MarkDuplicates.out[1],
+        SamtoolsStats.out,
+        SnpEff.out.snpEff_report,
+        Vcftools.out,
+        CollectHsMetrics.out
+    )
 } // end of workflow
 
 
@@ -380,7 +503,8 @@ def helpMessage() {
         --no_intervals              Disable usage of intervals
         --nucleotides_per_second      To estimate interval size
                                     Default: 1000.0
-        --target_bed                 Target BED file for targeted or whole exome sequencing
+        --target_bed                Target BED file (aka primary/regions/empirical) for targeted  or whole exome sequencing
+        --bait_bed                  Bait BED file (aka covered/captured) for targeted or whole exome sequencing (used for GATK CollectHsMetrics)
         --step                      Specify starting step
                                     Available: Mapping, Recalibrate, VariantCalling, Annotate
                                     Default: Mapping
@@ -418,9 +542,14 @@ def helpMessage() {
         --intervals                 intervals
                                     If none provided, will be generated automatically from the fasta reference
                                     Use --no_intervals to disable automatic generation
-        --known_indels               knownIndels file
-        --known_indels_index          knownIndels index
+        --known_indels              knownIndels file
+        --known_indels_index        knownIndels index
                                     If none provided, will be generated automatically if a knownIndels file is provided
+        --snpEff_db                 snpeffDb version
+        --snpEff_cache              snpeffDb cache path if you have downloaded it locally
+        --species                   species for VEP
+        --vep_cache                 Path to VEP cache if you have downloaded it locally
+        --vep_cache_version         VEP Cache version
     Other options:
         --outdir                    The output directory where the results will be saved
         --sequencing_center         Name of sequencing center to be displayed in BAM file
@@ -442,6 +571,41 @@ def helpMessage() {
                                 PROCESSES
 ================================================================================
 */
+/*
+ * Parse software version numbers
+ */
+process GetSoftwareVersions {
+    publishDir "${params.outdir}/pipeline_info", mode: params.publish_dir_mode
+
+    output:
+        // file 'software_versions_mqc.yaml', emit: yamlSoftwareVersion
+        file 'software_versions_mqc.yaml'
+
+    when: !('versions' in skipQC)
+
+    script:
+    """
+    bcftools version > v_bcftools.txt 2>&1 || true
+    bwa &> v_bwa.txt 2>&1 || true
+    configManta.py --version > v_manta.txt 2>&1 || true
+    configureStrelkaGermlineWorkflow.py --version > v_strelka.txt 2>&1 || true
+    echo "${workflow.manifest.version}" &> v_pipeline.txt 2>&1 || true
+    echo "${workflow.nextflow.version}" &> v_nextflow.txt 2>&1 || true
+    echo "SNPEFF version"\$(snpEff -h 2>&1) > v_snpeff.txt
+    fastqc --version > v_fastqc.txt 2>&1 || true
+    freebayes --version > v_freebayes.txt 2>&1 || true
+    gatk ApplyBQSR --help 2>&1 | grep Version: > v_gatk.txt 2>&1 || true
+    multiqc --version &> v_multiqc.txt 2>&1 || true
+    qualimap --version &> v_qualimap.txt 2>&1 || true
+    R --version &> v_r.txt  || true
+    samtools --version &> v_samtools.txt 2>&1 || true
+    tiddit &> v_tiddit.txt 2>&1 || true
+    vcftools --version &> v_vcftools.txt 2>&1 || true
+    vep --help &> v_vep.txt 2>&1 || true
+
+    scrape_software_versions.py &> software_versions_mqc.yaml
+    """
+}
 
 /*
 ================================================================================
@@ -704,43 +868,6 @@ process FastQCFQ {
 
 
 
-// process BedToIntervalList {
-//     echo true
-
-//     publishDir "${OUT_DIR}/interval_lists/" , mode: 'copy', overwrite: false
-    
-//     input:
-//     file(intervals_bed)
-
-//     output:
-//     file(out_file)
-
-//     script:
-//     out_file = "${intervals_bed.simpleName}.interval_list"
-//    """
-//    gatk BedToIntervalList \
-//       -I=$intervals_bed \
-//       -O=$out_file \
-//       -SD=$ref_dict
-//    """
-// }
-// process TestMapReads {
-//     label 'cpus_max'
-//     echo true
-//     tag {idPatient + "-" + idRun}
-//     // publishDir "${params.outdir}/Bams/${idSample}/${idSample}_${idRun}", mode: params.publish_dir_mode
-
-//     input:
-//         tuple idPatient, idSample, idRun, file(inputFile1), file(inputFile2)
-//         file(bwaIndex) 
-//         file(fasta) 
-//         file(fastaFai)
-//     output:
-//     script:
-//     """
-//         echo "idSample: $idSample" 
-//     """
-//     }
 // STEP 1: MAPPING READS TO REFERENCE GENOME WITH BWA MEM
 process MapReads {
     label 'cpus_max'
@@ -759,7 +886,8 @@ process MapReads {
         // tuple idPatient, val("${idSample}_${idRun}"), file("${idSample}_${idRun}.bam")
         tuple idPatient, idSample, idRun, file("${idSample}_${idRun}.bam"), emit : bam_mapped
         tuple idPatient, val("${idSample}_${idRun}"), file("${idSample}_${idRun}.bam"), emit : bam_mapped_BamQC
-
+    
+    when: !(step in ['recalibrate', 'variantcalling', 'annotate'])
     script:
     // -K is an hidden option, used to fix the number of reads processed by bwa mem
     // Chunk size can affect bwa results, if not specified,
@@ -821,8 +949,29 @@ process IndexBamFile {
 
 // STEP 2: MARKING DUPLICATES
 
+process Sambamba_MD {
+    label 'cpus_32'
+    // label 'memory_max'
+    // cache false
+    tag {idPatient + "-" + idSample}
+
+    publishDir "${params.outdir}/Preprocessing/${idSample}/DuplicateMarked/", mode: params.publish_dir_mode
+
+    input:
+        tuple idPatient, idSample, file("${idSample}.bam")
+
+    output:
+        tuple idPatient, idSample, file("${idSample}.md.bam"), file("${idSample}.md.bai")
+
+    """
+    sambamba markdup -t 20 -p ${idSample}.bam ${idSample}.md.bam
+    samtools index ${idSample}.md.bam
+    mv ${idSample}.md.bam.bai ${idSample}.md.bai
+    """
+}
+
 process MarkDuplicates {
-    label 'cpus_16'
+    label 'cpus_32'
     // label 'memory_max'
     // cache false
     tag {idPatient + "-" + idSample}
@@ -838,7 +987,8 @@ process MarkDuplicates {
         tuple idPatient, idSample, file("${idSample}.bam")
 
     output:
-        tuple idPatient, idSample, file("${idSample}.md.bam"), file("${idSample}.md.bai"), emit: 'marked_bams'
+        tuple idPatient, idSample, file("${idSample}.md.bam"), file("${idSample}.md.bai"), emit: marked_bams
+        // file ("${idSample}.bam.metrics"), emit: mark_duplicates_reports
         file ("${idSample}.bam.metrics")
 
     when: params.known_indels
@@ -850,7 +1000,7 @@ process MarkDuplicates {
     """
     gatk --java-options ${markdup_java_options} \
         MarkDuplicates \
-        --MAX_RECORDS_IN_RAM 50000 \
+        --MAX_RECORDS_IN_RAM 500000 \
         --INPUT ${idSample}.bam \
         --METRICS_FILE ${idSample}.bam.metrics \
         --TMP_DIR . \
@@ -905,6 +1055,7 @@ process BaseRecalibrator {
         --verbosity INFO
     """
 }
+
 // STEP 3.5: MERGING RECALIBRATION TABLES
 
 process GatherBQSRReports {
@@ -1042,7 +1193,7 @@ process SamtoolsStats {
 process BamQC {
     // label 'memory_max'
     label 'cpus_16'
-    cache false
+    // cache false
 
     tag {idPatient + "-" + idSample}
 
@@ -1074,6 +1225,63 @@ process BamQC {
         -outformat HTML
     """
 }
+// process CollectAlignmentSummaryMetrics{
+//     label 'cpus_16'
+//     tag {idPatient + "-" + idSample}
+    
+//     publishDir "${params.outdir}/Reports/${idSample}/alignment_summary/", mode: params.publish_dir_mode
+    
+//     input:
+//     tuple idPatient, idSample, file(bam) 
+//     file(fasta) 
+//     file(dict)
+//     file(fastaFai)
+//     output:
+//     file("${bam.baseName}_alignment_metrics.txt")
+    
+//     when: ! ('alignment_summary' in sk)
+    
+//     script:
+//     """
+//     gatk --java-options -Xmx32G CollectAlignmentSummaryMetrics --VALIDATION_STRINGENCY=LENIENT \
+//     -I=$bam \
+//     -O=${bam.baseName}_alignment_metrics.txt \
+//     -R=$ref_fasta
+//     """
+// }
+
+process CollectHsMetrics{
+    label 'cpus_16'
+    tag {idPatient + "-" + idSample}
+    
+    publishDir "${params.outdir}/Reports/${idSample}/hs_metrics/", mode: params.publish_dir_mode
+    
+    input:
+    tuple idPatient, idSample, file(bam)
+    file(targetBED)
+    file(baitBED)
+    file(fasta) 
+    file(fastaFai)
+    file(dict)
+
+    output:
+    file("${bam.baseName}_hs_metrics.txt")
+    
+    
+    when: !('hs_metrics' in skipQC) && params.bait_bed
+    script:
+    """
+    gatk BedToIntervalList -I=$targetBED -O=target.interval_list -SD=$dict
+    gatk BedToIntervalList -I=$baitBED -O=bait.interval_list -SD=$dict
+
+    gatk --java-options -Xmx32G CollectHsMetrics --VALIDATION_STRINGENCY=LENIENT \
+    -I=$bam \
+    -O=${bam.baseName}_hs_metrics.txt \
+    -TI=target.interval_list \
+    -BI=bait.interval_list \
+    -R=$fasta
+    """
+}
 
 
 /*
@@ -1092,7 +1300,7 @@ process HaplotypeCaller {
 
     tag {idSample + "-" + intervalBed.baseName}
     // tag {idSample} 
-    publishDir "${params.outdir}/VariantCalling/${idSample}/HaplotypeCaller", mode: params.publish_dir_mode
+    // publishDir "${params.outdir}/VariantCalling/${idSample}/HaplotypeCaller", mode: params.publish_dir_mode
     input:
         tuple idPatient, idSample, file(bam), file(bai), file(intervalBed) 
         // tuple idPatient, idSample, file(bam), file(bai) 
@@ -1156,6 +1364,7 @@ process GenotypeGVCFs {
         -O ${intervalBed.baseName}_${idSample}.vcf
     """
 }
+
 process ConcatVCF {
     label 'cpus_8'
 
@@ -1171,6 +1380,7 @@ process ConcatVCF {
     output:
     // we have this funny *_* pattern to avoid copying the raw calls to publishdir
         tuple variantCaller, idPatient, idSample, file("*_*.vcf.gz"), file("*_*.vcf.gz.tbi"), emit: vcf_concatenated
+        tuple variantCaller, idSample, file("*_*.vcf.gz"), emit: vcf_concatenated_to_annotate
 
     when: ('haplotypecaller' in tools || 'mutect2' in tools || 'freebayes' in tools)
 
@@ -1192,10 +1402,11 @@ process PrintCh{
     
     input:
     file(in_ch)
-
+    script:
     """
-    println("PrintCh()")
-    cat $in_ch
+    echo "PrintCh()"
+    pwd
+    ls -al 
     """
 }
 // STEP STRELKA.1 - SINGLE MODE
@@ -1296,362 +1507,360 @@ process MantaSingle {
     """
 }
 
+// STEP TIDDIT
 
-process CramToBam{
-    echo true
-    tag "$sample"
-    publishDir "${OUT_DIR}/align/bams" , mode: 'copy', overwrite: false
+process TIDDIT {
+    tag {idSample}
+
+    publishDir "${params.outdir}/VariantCalling/${idSample}/TIDDIT", mode: params.publish_dir_mode
+
+    publishDir params.outdir, mode: params.publish_dir_mode,
+        saveAs: {
+            if (it == "TIDDIT_${idSample}.vcf") "VariantCalling/${idSample}/TIDDIT/${it}"
+            else "Reports/${idSample}/TIDDIT/${it}"
+        }
+
     input:
-    file(cram)
+        tuple idPatient, idSample, file(bam), file(bai)
+        file(fasta) 
+        file(fastaFai)
 
     output:
-    file(out_file)
-    // file("${out_file}.bai")
+        tuple val("TIDDIT"), idPatient, idSample, file("*.vcf.gz"), file("*.tbi"), emit: vcfTIDDIT
+        tuple file("TIDDIT_${idSample}.old.vcf"), file("TIDDIT_${idSample}.ploidy.tab"), file("TIDDIT_${idSample}.signals.tab"), file("TIDDIT_${idSample}.wig"), file("TIDDIT_${idSample}.gc.wig"), emit: tidditOut
+
+    when: 'tiddit' in tools
 
     script:
-    sample = "${cram.simpleName}"
-    out_file = "${sample}.bam"
-    
-    script:
-   """
-   samtools view -T $ref_fasta -b -o $out_file $cram \
-   && samtools index $out_file
-   """
-}
-
-// process SplitIntervals{
-//     echo true
-//     tag "$sample"
-//     // cache false
-//     publishDir "${OUT_DIR}/splitted_intervals/" , mode: 'copy', overwrite: false
-    
-//     input:
-//     file(bed_file)
-
-//     output:
-//     file("*.bed")
-
-//     script:
-//     """
-//     total_lines=`cat $bed_file|wc -l`
-//     lines_per_split=`expr \$total_lines / 24`
-//     split -l \$lines_per_split $bed_file split_ \
-//     --numeric-suffixes=1 \
-//     --additional-suffix=.bed \
-//     -e
-//     """
-// }
-
-// process BamToCram{
-//     echo true
-//     tag "$sample"
-//     publishDir "${OUT_DIR}/align/crams" , mode: 'copy', overwrite: false
-    
-//     input:
-//     file(bam)
-
-//     output:
-//     file(out_file)
-//     file("${out_file}.crai")
-
-//     script:
-//     sample = "${bam.simpleName}"
-//     out_file = "${sample}.cram"
-    
-//     script:
-//     """
-//     samtools view -C $bam -T $ref_fasta  -o $out_file  \
-//     && samtools index $out_file
-//     """
-// }
-
-process CollectInsertSizeMetrics{
-    echo true
-    tag "$sample"
-    publishDir "${OUT_DIR}/qc/picard_stats" , mode: 'copy', overwrite: false
-    
-    input:
-    file(bam)
-    // file(bam_index)
-
-    output:
-    file("${sample}_insert_size_metrics.txt")
-    file("${sample}_insert_size_metrics.pdf")
-
-    script:
-    sample = "${bam.simpleName}"
     """
-    gatk --java-options -Xmx32G CollectInsertSizeMetrics --VALIDATION_STRINGENCY=LENIENT \
-    -I=$in_bam \
-    -O=${sample}_insert_size_metrics.txt \
-    -H=${sample}_insert_size_metrics.pdf
+    tiddit --sv -o TIDDIT_${idSample} --bam ${bam} --ref ${fasta}
+
+    mv TIDDIT_${idSample}.vcf TIDDIT_${idSample}.old.vcf
+
+    grep -E "#|PASS" TIDDIT_${idSample}.old.vcf > TIDDIT_${idSample}.vcf
+
+    bgzip --threads ${task.cpus} -c TIDDIT_${idSample}.vcf > TIDDIT_${idSample}.vcf.gz
+
+    tabix TIDDIT_${idSample}.vcf.gz
     """
 }
 
-process CollectAlignmentSummaryMetrics{
-    echo true
-    tag "$sample"
-    publishDir "${OUT_DIR}/qc/picard_stats" , mode: 'copy', overwrite: false
-    
+
+// STEP VCF.QC
+
+process BcftoolsStats {
+    label 'cpus_1'
+
+    tag {"${variantCaller} - ${vcf}"}
+
+    publishDir "${params.outdir}/Reports/${idSample}/BCFToolsStats", mode: params.publish_dir_mode
+
     input:
-    file(bam)
+        tuple variantCaller, idSample, file(vcf)
 
     output:
-    file("${sample}_alignment_metrics.txt")
-    
+        // file ("*.bcf.tools.stats.out"), emit: bcftools_reports
+        file ("*.bcf.tools.stats.out")
+
+    when: !('bcftools' in skipQC)
+
     script:
-    sample = "${bam.simpleName}"
     """
-    gatk --java-options -Xmx32G CollectAlignmentSummaryMetrics --VALIDATION_STRINGENCY=LENIENT \
-    -I=$in_bam \
-    -O=${sample}_alignment_metrics.txt \
-    -R=$ref_fasta
+    bcftools stats ${vcf} > ${reduceVCF(vcf.fileName)}.bcf.tools.stats.out
     """
 }
 
-process CollectHsMetrics{
-    echo true
-    tag "$sample"
-    publishDir "${OUT_DIR}/qc/picard_stats" , mode: 'copy', overwrite: false
-    
+
+process Vcftools {
+    label 'cpus_1'
+
+    tag {"${variantCaller} - ${vcf}"}
+
+    publishDir "${params.outdir}/Reports/${idSample}/VCFTools", mode: params.publish_dir_mode
+
     input:
-    file(bam)
+        tuple variantCaller, idSample, file(vcf)
 
     output:
-    file("${sample}_hs_metrics.txt")
+        file ("${reduceVCF(vcf.fileName)}.*")
+
+    when: !('vcftools' in skipQC)
 
     script:
-    sample = "${bam.simpleName}"
-    script:
     """
-    gatk --java-options -Xmx32G CollectHsMetrics --VALIDATION_STRINGENCY=LENIENT \
-    -I=$in_bam \
-    -O=${sample}_hs_metrics.txt \
-    -TI=$target_intervals \
-    -BI=$bait_intervals \
-    -R=$ref_fasta
+    vcftools \
+    --gzvcf ${vcf} \
+    --TsTv-by-count \
+    --out ${reduceVCF(vcf.fileName)}
+
+    vcftools \
+    --gzvcf ${vcf} \
+    --TsTv-by-qual \
+    --out ${reduceVCF(vcf.fileName)}
+
+    vcftools \
+    --gzvcf ${vcf} \
+    --FILTER-summary \
+    --out ${reduceVCF(vcf.fileName)}
     """
 }
 
-// process CreateRecalibrationTable{
-//     echo true
-//     tag "$sample"
-//     publishDir "${OUT_DIR}/recal_table/", mode: 'copy', overwrite: false
 
-//     input:
-//     file (sample_cram)
-    
-//     output:
-//     file(sample_cram)
-//     file("${sample}.recal.table")
-    
-//     script:
-//     sample = sample_cram.baseName
-//     out_file= "${sample}.recal.table"
-//     if (params.dataType == 'wgs')
-//         """
-//         gatk BaseRecalibrator \
-//                 -I  $sample_cram\
-//                 --known-sites $dbsnp \
-//                 --known-sites $known_indels \
-//                 -O $out_file \
-//                 -R $ref_fasta
-//         """
-//     else if (params.dataType == 'wes')
-//         """
-//         gatk BaseRecalibrator \
-//                 -I  $sample_cram\
-//                 --known-sites $dbsnp \
-//                 --known-sites $known_indels \
-//                 --intervals $target_intervals \
-//                 -O $out_file \
-//                 -R $ref_fasta
-//         """
-//     else
-//         error "Invalid data type: ${params.dataType} (see --help)"
-// }
+/*
+================================================================================
+                                   ANNOTATION
+================================================================================
+*/
 
-// process ApplyBQSR {
-//     echo true
-//     tag "$sample"
-//     publishDir "${OUT_DIR}/BQSR/", mode: 'copy', overwrite: false
+// STEP SNPEFF
 
-//     input:
-//     file(sample_cram) 
-//     file(recalibrated_file)
-
-    
-//     output:
-//     file("${sample}.bqsr.bam")
-//     file("${sample}.bqsr.bai")
-
-//     script:
-//     sample = "${sample_cram.baseName}"
-//     out_file = "${sample}.bqsr.bam"
-
-//     if (params.dataType == 'wgs')
-//         """
-//         gatk ApplyBQSR \
-//             -I $sample_cram \
-//             -R $ref_fasta \
-//             -bqsr $recalibrated_file \
-//             -O $out_file 
-//         """
-//     else if (params.dataType == 'wes')
-//         """
-//         gatk ApplyBQSR \
-//             -I $sample_cram \
-//             -R $ref_fasta \
-//             -bqsr $recalibrated_file \
-//             --intervals $target_intervals \
-//             -O $out_file
-//         """
-//     else
-//         error "Invalid data type: ${params.dataType} (see --help)"
-// }
-
-// process RunHaplotypeCaller {
-//     echo true
-//     tag "$sample"
-//     publishDir "${OUT_DIR}/haplotype_caller/", mode: 'copy', overwrite: false
-
-//     input:
-//     // file(interval_list)
-//     file(file_bqsr_bam)
-//     // file('*')
-    
-//     output:
-//     file "${sample}.gvcf.gz" 
-//     // file "${sample}.gvcf.idx" 
-//     // file "${sample}.gvcf.gz.tbi"
-    
-//     script:
-//     sample = file_bqsr_bam.simpleName
-//     out_file = "${sample}.gvcf"
-//     // if (params.dataType == 'wgs')
-//     """
-//     gatk --java-options "-Xmx18g -Xms6000m -XX:GCTimeLimit=50 -XX:GCHeapFreeLimit=10" \
-//         HaplotypeCaller \
-//             -I $file_bqsr_bam \
-//             --dbsnp $dbsnp \
-//             -O $out_file \
-//             --emit-ref-confidence GVCF \
-//             -R $ref_fasta
-//     """
-// }
-
-
-// process GenotypeGVCF{
-//     echo true
-//     publishDir "${OUT_DIR}/genotyped_gvcf/", mode: 'copy', overwrite: false
-
-//     input:
-//     file(gvcf)
-
-//     output:
-//     file "$out_file"
-
-//     script:
-//     out_file = "${gvcf.baseName}.vcf"
-//     """
-//     tabix $gvcf
-//     gatk --java-options -Xmx64g \
-//         GenotypeGVCFs \
-//         --dbsnp $dbsnp \
-//         -R $ref_fasta \
-//         -O $out_file  \
-//         -V $gvcf
-//     """
-// }
-
-// process ConcatVCF{
-//     echo true
-//     publishDir "${OUT_DIR}/results/", mode: 'copy', overwrite: false
-    
-//     input:
-//     file('*')
-
-//     output:
-//     file(out_file)
-//     file "${out_file}.gz" 
-//     file "${out_file}.gz.tbi"
-
-//     script:
-//     out_file='cohort_joint.vcf'
-//     // vcf_list=''
-//     // chrmList.view{
-//     //     vcf_list += "$it "
-//     // }
-//     vcfs = ''
-//     listOfChromosoms.each{
-//         vcfs += "${it}.vcf "
-//     }
-//     """
-//     bcftools concat -o ${out_file} -Ov $vcfs
-//     bgzip -c ${out_file} > ${out_file}.gz
-//     tabix -p vcf ${out_file}.gz
-// """
-// }
-
-process RunCSQ{
-    echo true
-    publishDir "${OUT_DIR}/csq/", mode: 'copy', overwrite: false
+process SnpEff {
+    tag {"${idSample} - ${variantCaller} - ${vcf}"}
+    // cache false
+    publishDir params.outdir, mode: params.publish_dir_mode, saveAs: {
+        if (it == "${reducedVCF}_snpEff.ann.vcf") null
+        else "Reports/${idSample}/snpEff/${it}"
+    }
 
     input:
-    file(vcf)
+        tuple variantCaller, idSample, file(vcf) 
+        file(dataDir)
+        // path(dataDir)
+        val snpeffDb
 
     output:
-    file "$out_file"
+        tuple file("${reducedVCF}_snpEff.txt"), file("${reducedVCF}_snpEff.html"), file("${reducedVCF}_snpEff.csv"), emit:snpEff_report
+        tuple variantCaller, idSample, file("${reducedVCF}_snpEff.ann.vcf"), emit: snpEff_vcf
+
+    when: 'snpeff' in tools || 'merge' in tools
 
     script:
-    out_file = "cohort.bcf"    
+    reducedVCF = reduceVCF(vcf.fileName)
+    cache = (params.snpEff_cache && params.annotation_cache) ? "-dataDir \${PWD}/${dataDir}" : ""
+    // cache = (params.snpeff_cache && params.annotation_cache) ? "-dataDir ${dataDir}" : ""
     """
-    bcftools norm -m- -Ov  -f $ref_fasta -w 10000 $vcf |\
-    bcftools csq -s - --ncsq 40 -g $ensembl_gene_annotation -l -f $ref_fasta -Ob -o $out_file
+    snpEff -Xmx${task.memory.toGiga()}g \
+        ${snpeffDb} \
+        -csvStats ${reducedVCF}_snpEff.csv \
+        -nodownload \
+        ${cache} \
+        -canon \
+        -v \
+        ${vcf} \
+        > ${reducedVCF}_snpEff.ann.vcf
+
+    mv snpEff_summary.html ${reducedVCF}_snpEff.html
+    mv ${reducedVCF}_snpEff.genes.txt ${reducedVCF}_snpEff.txt
     """
 }
 
-process VariantEval{
-    echo true
-    publishDir "${OUT_DIR}/variant_eval/", mode: 'copy', overwrite: false
+// snpeffReport = snpeffReport.dump(tag:'snpEff report')
+
+// STEP COMPRESS AND INDEX VCF.1 - SNPEFF
+
+process CompressVCFsnpEff {
+    tag {"${idSample} - ${vcf}"}
+
+    publishDir "${params.outdir}/Annotation/${idSample}/snpEff", mode: params.publish_dir_mode
 
     input:
-    file(cohort_vcf)
-    file(vcf_index)
+        tuple variantCaller, idSample, file(vcf)
 
     output:
-    file "$out_file"
+        tuple variantCaller, idSample, file("*.vcf.gz"), file("*.vcf.gz.tbi"), emit: compressVCFsnpEffOut
 
     script:
-    out_file = "cohort.eval.grp"    
-    script:
-    """ 
-    gatk VariantEval --eval $cohort_vcf --comp $dbsnp -R $ref_fasta --output $out_file
-    """  
+    """
+    bgzip < ${vcf} > ${vcf}.gz
+    tabix ${vcf}.gz
+    """
 }
 
-process RunMultiQC {
-    publishDir "${OUT_DIR}/qc/multiqc", mode: 'copy', overwrite: false
+
+// STEP VEP.1
+
+process VEP {
+    label 'VEP'
+    label 'cpus_4'
+
+    tag {"${idSample} - ${variantCaller} - ${vcf}"}
+
+    publishDir params.outdir, mode: params.publish_dir_mode, saveAs: {
+        if (it == "${reducedVCF}_VEP.summary.html") "Reports/${idSample}/VEP/${it}"
+        else null
+    }
 
     input:
-    file (fastqc:'fastqc/*')
-    file ('gatk_base_recalibration/*')
-    file ('gatk_variant_eval/*')
-    
+        tuple variantCaller, idSample, file(vcf), file(idx) 
+        file(dataDir) 
+        val cache_version 
+        file(cadd_InDels) 
+        file(cadd_InDels_tbi) 
+        file(cadd_WG_SNVs) 
+        file(cadd_WG_SNVs_tbi) 
+        file(fasta)
+        file(fasta_fai)
     output:
-    file '*multiqc_report.html'
-    file '*_data'
-    file '.command.err'
-    val prefix
+        tuple variantCaller, idSample, file("${reducedVCF}_VEP.ann.vcf"), emit: vep_vcf
+        // file("${reducedVCF}_VEP.summary.html") , emit: vep_report
+        file("${reducedVCF}_VEP.summary.html") 
+
+    when: ('vep' in tools) && params.cadd_InDels && params.cadd_WG_SNVs
 
     script:
-    prefix = fastqc[0].toString() - '_fastqc.html' - 'fastqc/'
-    rtitle = customRunName ? "--title \"$customRunName\"" : ''
-    rfilename = customRunName ? "--filename " + customRunName.replaceAll('\\W','_').replaceAll('_+','_') + "_multiqc_report" : ''
+    reducedVCF = reduceVCF(vcf.fileName)
+    genome = params.genome == 'smallGRCh37' ? 'GRCh37' : params.genome
+
+    dir_cache = (params.vep_cache && params.annotation_cache) ? " \${PWD}/${dataDir}" : "/.vep"
+    // cadd = (params.cadd_cache && params.cadd_WG_SNVs && params.cadd_InDels) ? "--plugin CADD,whole_genome_SNVs.tsv.gz,InDels.tsv.gz" : ""
+    cadd = (params.cadd_WG_SNVs && params.cadd_InDels) ? "--plugin CADD,whole_genome_SNVs.tsv.gz,InDels.tsv.gz" : ""
+    genesplicer = params.genesplicer ? "--plugin GeneSplicer,/opt/miniconda/envs/layer_lab_dna_seq/bin/genesplicer,/opt/miniconda/envs/layer_lab_dna_seq/share/genesplicer-1.0-1/human,context=200,tmpdir=\$PWD/${reducedVCF}" : "--offline"
     """
-    multiqc -f $rtitle $rfilename  . 2>&1
+    mkdir ${reducedVCF}
+
+    vep \
+        -i ${vcf} \
+        -o ${reducedVCF}_VEP.ann.vcf \
+        --assembly ${genome} \
+        --species ${params.species} \
+        ${cadd} \
+        ${genesplicer} \
+        --cache \
+        --cache_version ${cache_version} \
+        --dir_cache ${dir_cache} \
+        --everything \
+        --filter_common \
+        --fork ${task.cpus} \
+        --format vcf \
+        --per_gene \
+        --stats_file ${reducedVCF}_VEP.summary.html \
+        --total_length \
+        --vcf \
+        --offline
+    rm -rf ${reducedVCF}
     """
 }
+
+// vepReport = vepReport.dump(tag:'VEP')
+
+// STEP VEP.2 - VEP AFTER SNPEFF
+
+process VEPmerge {
+    label 'VEP'
+    label 'cpus_4'
+
+    tag {"${idSample} - ${variantCaller} - ${vcf}"}
+
+    publishDir params.outdir, mode: params.publish_dir_mode, saveAs: {
+        if (it == "${reducedVCF}_VEP.summary.html") "Reports/${idSample}/VEP/${it}"
+        else null
+    }
+
+    input:
+        tuple variantCaller, idSample, file(vcf), file(idx) 
+        file(dataDir) 
+        val cache_version 
+        file(cadd_InDels) 
+        file(cadd_InDels_tbi) 
+        file(cadd_WG_SNVs) 
+        file(cadd_WG_SNVs_tbi) 
+        file(fasta)
+        file(fasta_fai)
+    output:
+        tuple variantCaller, idSample, file("${reducedVCF}_VEP.ann.vcf"), emit: vep_vcf_merge
+        // file("${reducedVCF}_VEP.summary.html") , emit: vep_report_merge
+        file("${reducedVCF}_VEP.summary.html") 
+
+    when: ('merge' in tools) && params.cadd_InDels && params.cadd_WG_SNVs
+
+    script:
+    reducedVCF = reduceVCF(vcf.fileName)
+    genome = params.genome == 'smallGRCh37' ? 'GRCh37' : params.genome
+    dir_cache = (params.vep_cache && params.annotation_cache) ? " \${PWD}/${dataDir}" : "/.vep"
+    // cadd = (params.cadd_cache && params.cadd_WG_SNVs && params.cadd_InDels) ? "--plugin CADD,whole_genome_SNVs.tsv.gz,InDels.tsv.gz" : ""
+    cadd = (params.cadd_WG_SNVs && params.cadd_InDels) ? "--plugin CADD,whole_genome_SNVs.tsv.gz,InDels.tsv.gz" : ""
+    genesplicer = params.genesplicer ? "--plugin GeneSplicer,/opt/miniconda/envs/layer_lab_dna_seq/bin/genesplicer,/opt/miniconda/envs/layer_lab_dna_seq/share/genesplicer-1.0-1/human,context=200,tmpdir=\$PWD/${reducedVCF}" : "--offline"
+    """
+    mkdir ${reducedVCF}
+
+    vep \
+        -i ${vcf} \
+        -o ${reducedVCF}_VEP.ann.vcf \
+        --assembly ${genome} \
+        --species ${params.species} \
+        ${cadd} \
+        ${genesplicer} \
+        --cache \
+        --cache_version ${cache_version} \
+        --dir_cache ${dir_cache} \
+        --everything \
+        --filter_common \
+        --fork ${task.cpus} \
+        --format vcf \
+        --per_gene \
+        --stats_file ${reducedVCF}_VEP.summary.html \
+        --total_length \
+        --vcf \
+        --offline
+
+    rm -rf ${reducedVCF}
+    """
+}
+
+
+// STEP COMPRESS AND INDEX VCF.2 - VEP
+
+process CompressVCFvep {
+    tag {"${idSample} - ${vcf}"}
+
+    publishDir "${params.outdir}/Annotation/${idSample}/VEP", mode: params.publish_dir_mode
+
+    input:
+        tuple variantCaller, idSample, file(vcf) 
+
+    output:
+        tuple variantCaller, idSample, file("*.vcf.gz"), file("*.vcf.gz.tbi") 
+
+    script:
+    """
+    bgzip < ${vcf} > ${vcf}.gz
+    tabix ${vcf}.gz
+    """
+}
+
+/*
+================================================================================
+                                     MultiQC
+================================================================================
+*/
+
+// STEP MULTIQC
+
+process MultiQC {
+    publishDir "${params.outdir}/Reports/MultiQC", mode: params.publish_dir_mode
+    input:
+        file (multiqcConfig) 
+        file (versions) 
+        // file ('bamQC/*') 
+        file ('BCFToolsStats/*') 
+        file ('FastQC/*') 
+        file ('MarkDuplicates/*') 
+        file ('SamToolsStats/*') 
+        file ('snpEff/*') 
+        file ('VCFTools/*')
+        file ('CollectHsMetrics/*')
+
+    output:
+        set file("*multiqc_report.html"), file("*multiqc_data") 
+
+    when: !('multiqc' in skipQC)
+
+    script:
+    """
+    multiqc -f -v .
+    """
+}
+
 
 /******************************************************************************************/
                                 /* Helper functions */
@@ -1674,6 +1883,7 @@ def printSummary(){
     if (workflow.containerEngine)   summary['Container']         = "${workflow.containerEngine} - ${workflow.container}"
     if (params.input)               summary['Input']             = params.input
     if (params.target_bed)           summary['Target BED']        = params.target_bed
+    if (params.bait_bed)           summary['BAIT BED']        = params.bait_bed
     if (step)                       summary['Step']              = step
     if (params.tools)               summary['Tools']             = tools.join(', ')
     if (params.skip_qc)              summary['QC tools skip']     = skipQC.join(', ')
@@ -1708,7 +1918,17 @@ def printSummary(){
     if (params.dbsnp_index)            summary['dbsnp_index']            = params.dbsnp_index
     if (params.known_indels)           summary['known_indels']           = params.known_indels
     if (params.known_indels_index)      summary['known_indels_index']      = params.known_indels_index
-
+    if (params.snpEff_db)              summary['snpEff_db']              = params.snpEff_db
+    if (params.species)               summary['species']               = params.species
+    if (params.vep_cache_version)       summary['vep_cache_version']       = params.vep_cache_version
+    // if (params.species)               summary['species']               = params.species
+    if (params.snpEff_cache)          summary['snpEff_cache']          = params.snpEff_cache
+    if (params.vep_cache)             summary['vep_cache']             = params.vep_cache
+    if (params.cadd_InDels)            summary['cadd_InDels']          = params.cadd_InDels
+    if (params.cadd_InDels_tbi)            summary['cadd_InDels_tbi']          = params.cadd_InDels_tbi
+    if (params.cadd_WG_SNVs)            summary['cadd_WG_SNVs']          = params.cadd_WG_SNVs
+    if (params.cadd_WG_SNVs_tbi)            summary['cadd_WG_SNVs_tbi']          = params.cadd_WG_SNVs_tbi
+    
 
     if (workflow.profile == 'awsbatch') {
         summary['AWS Region']        = params.awsregion
@@ -1725,7 +1945,8 @@ def printSummary(){
     log.info summary.collect { k, v -> "${k.padRight(18)}: $v" }.join("\n")
     if (params.monochrome_logs) log.info "----------------------------------------------------"
     else log.info "\033[2m----------------------------------------------------\033[0m"
-
+    // log.info("ByeBye")
+    // println(params)
 }
 def sortBedIntervalsByDescendingDuration(bedIntervals){
     bedIntervals
@@ -1746,19 +1967,6 @@ def sortBedIntervalsByDescendingDuration(bedIntervals){
     .map{duration, intervalFile -> intervalFile}
 }
 
-//  def getChrmList(){
-//     def chrs = (1..22).collect()
-//     chrs.addAll(['X', 'Y', 'MT'])
-//     return chrs
-//   }
-
-//   def getChrmListHg38(){
-//     def chrs = (1..22).collect()
-//     chrs.addAll(['X', 'Y'])
-//     return chrs.collect {"chr$it"}
-//   }
-
-
 // Check if a row has the expected number of item
 def checkNumberOfItem(row, number) {
     if (row.size() != number) exit 1, "Malformed row in TSV file: ${row}, see --help for more information"
@@ -1776,6 +1984,8 @@ def checkParameterExistence(it, list) {
 
 // Compare each parameter with a list of parameters
 def checkParameterList(list, realList) {
+    // println("passed list: $list")
+    // println("real list: $realList")
     return list.every{ checkParameterExistence(it, realList) }
 }
 
@@ -1810,6 +2020,7 @@ def defineSkipQClist() {
         'markduplicates',
         'multiqc',
         'samtools',
+        'hs_metrics',
         'sentieon',
         'vcftools',
         'versions'
@@ -2014,4 +2225,48 @@ def reduceVCF(file) {
 def returnStatus(it) {
     if (!(it in [0, 1])) exit 1, "Status is not recognized in TSV file: ${it}, see --help for more information"
     return it
+}
+// getvcfs to annotate
+def getVCFsToAnnotate(results_dir){
+    vcf_to_annotate = Channel.empty()
+    // vcf_no_annotate = Channel.empty()
+
+    if (tsvPath == []) {
+    // Sarek, by default, annotates all available vcfs that it can find in the VariantCalling directory
+    // Excluding vcfs from FreeBayes, and g.vcf from HaplotypeCaller
+    // Basically it's: results/VariantCalling/*/{HaplotypeCaller,Manta,Mutect2,SentieonDNAseq,SentieonDNAscope,SentieonTNscope,Strelka,TIDDIT}/*.vcf.gz
+    // Without *SmallIndels.vcf.gz from Manta, and *.genome.vcf.gz from Strelka
+    // The small snippet `vcf.minus(vcf.fileName)[-2]` catches idSample
+    // This field is used to output final annotated VCFs in the correct directory
+    
+    Channel.empty().mix(
+    Channel.fromPath("${results_dir}/VariantCalling/*/HaplotypeCaller/*.vcf.gz")
+        .flatten().map{vcf -> ['HaplotypeCaller', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+    Channel.fromPath("${results_dir}/VariantCalling/*/Manta/*[!candidate]SV.vcf.gz")
+        .flatten().map{vcf -> ['Manta', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+    Channel.fromPath("${results_dir}/VariantCalling/*/Mutect2/*.vcf.gz")
+        .flatten().map{vcf -> ['Mutect2', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+    Channel.fromPath("${results_dir}/VariantCalling/*/SentieonDNAseq/*.vcf.gz")
+        .flatten().map{vcf -> ['SentieonDNAseq', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+    Channel.fromPath("${results_dir}/VariantCalling/*/SentieonDNAscope/*.vcf.gz")
+        .flatten().map{vcf -> ['SentieonDNAscope', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+    Channel.fromPath("${results_dir}/VariantCalling/*/SentieonTNscope/*.vcf.gz")
+        .flatten().map{vcf -> ['SentieonTNscope', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+    Channel.fromPath("${results_dir}/VariantCalling/*/Strelka/*{somatic,variant}*.vcf.gz")
+        .flatten().map{vcf -> ['Strelka', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+    Channel.fromPath("${results_dir}/VariantCalling/*/TIDDIT/*.vcf.gz")
+        .flatten().map{vcf -> ['TIDDIT', vcf.minus(vcf.fileName)[-2].toString(), vcf]}
+    ).filter {
+        annotate_tools == [] || (annotate_tools != [] && it[0] in annotate_tools)
+    }.set{vcf_to_annotate}
+    } else if (annotate_tools == []) {
+    // Annotate user-submitted VCFs
+    // If user-submitted, Sarek assume that the idSample should be assumed automatically
+      vcf_to_annotate = Channel.fromPath(tsvPath)
+        .map{vcf -> ['userspecified', vcf.minus(vcf.fileName)[-2].toString(), vcf]}
+    } else exit 1, "specify only tools or files to annotate, not both"
+
+    //vcfNoAnnotate.close()
+    //vcfAnnotation = vcfAnnotation.mix(vcfToAnnotate)
+    return vcf_to_annotate
 }

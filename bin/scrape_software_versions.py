@@ -4,8 +4,8 @@ from collections import OrderedDict
 import re
 
 regexes = {
-    'AlleleCount': ['v_allelecount.txt', r"(\S+)"],
-    'ASCAT': ['v_ascat.txt', r"Version:       (\S+)"],
+    # 'AlleleCount': ['v_allelecount.txt', r"(\S+)"],
+    # 'ASCAT': ['v_ascat.txt', r"Version:       (\S+)"],
     'bcftools': ['v_bcftools.txt', r"bcftools (\S+)"],
     'BWA': ['v_bwa.txt', r"Version: (\S+)"],
     'FastQC': ['v_fastqc.txt', r"FastQC v(\S+)"],
@@ -15,7 +15,7 @@ regexes = {
     'Manta': ['v_manta.txt', r"([0-9.]+)"],
     'MultiQC': ['v_multiqc.txt', r"multiqc, version (\S+)"],
     'Nextflow': ['v_nextflow.txt', r"(\S+)"],
-    'nf-core/sarek': ['v_pipeline.txt', r"(\S+)"],
+    # 'nf-core/sarek': ['v_pipeline.txt', r"(\S+)"],
     'Qualimap': ['v_qualimap.txt', r"QualiMap v.(\S+)"],
     'R': ['v_r.txt', r"R version (\S+)"],
     'samtools': ['v_samtools.txt', r"samtools (\S+)"],
@@ -26,10 +26,10 @@ regexes = {
     'VEP': ['v_vep.txt', r"ensembl-vep          : (\S+)"],
 }
 results = OrderedDict()
-results['nf-core/sarek'] = '<span style="color:#999999;\">N/A</span>'
+# results['nf-core/sarek'] = '<span style="color:#999999;\">N/A</span>'
 results['Nextflow'] = '<span style="color:#999999;\">N/A</span>'
-results['AlleleCount'] = '<span style="color:#999999;\">N/A</span>'
-results['ASCAT'] = '<span style="color:#999999;\">N/A</span>'
+# results['AlleleCount'] = '<span style="color:#999999;\">N/A</span>'
+# results['ASCAT'] = '<span style="color:#999999;\">N/A</span>'
 results['bcftools'] = '<span style="color:#999999;\">N/A</span>'
 results['BWA'] = '<span style="color:#999999;\">N/A</span>'
 results['FastQC'] = '<span style="color:#999999;\">N/A</span>'
@@ -63,8 +63,8 @@ for k in results:
 # Dump to YAML
 print ('''
 id: 'software_versions'
-section_name: 'nf-core/sarek software versions'
-section_href: 'https://github.com/nf-core/sarek'
+section_name: 'Layer Lab DNA Seq Singularity Container software versions'
+section_href: 'https://github.com/javaidm/layer_lab_vc'
 plot_type: 'html'
 description: 'are collected at run time from the software output.'
 data: |
