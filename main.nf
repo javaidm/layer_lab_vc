@@ -315,19 +315,28 @@ workflow{
 
     // gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs.groupTuple(by:[2])
     // gvcf_GenotypeGVCFs.dump(tag:'GVCF for GenotypeGVCFs')
-    mapped_gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs
-                                .map{idPatient, idSample, interval,gvcf ->
-                                [file(interval).baseName, interval, idPatient, idSample, gvcf]}
     // mapped_gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs
-    //                             .map{idPatient, idSample, interval,gvcf ->
-    //                             [file(interval).name, idPatient, idSample,gvcf]}
-    // mapped_gvcf_GenotypeGVCFs.dump(tag: 'mapped GVCF for GenotypGVCFs')                                
-    mapped_gvcf_GenotypeGVCFs = mapped_gvcf_GenotypeGVCFs
-    .groupTuple(by:[0])
-    .map{interval_name, interval, idPatient, idSample, gvcf -> 
-        [interval_name, interval.first(), idPatient, idSample, gvcf]
-        }
-    // .dump(tag: 'groupTuple mapped GVCF for GenotypGVCFs')  
+    //                             .map{idPatient, idSample, intervalBed, gvcf ->
+    //                             [intervalBed.baseName, intervalBed, idPatient, idSample, gvcf]}
+    //                             .groupTuple(by:[0])
+    //                             .map{interval_name, liIntervalBed, liIdPatient, liIdSample, liGvcf -> 
+    //                                 [interval_name, liIntervalBed.first(), liIdPatient, liIdSample, liGvcf]
+    //                                 }
+    //                             .dump(tag: 'Collected HaplotypeCaller output')
+    
+    mapped_gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs
+                                .map{idPatient, idSample, intervalBed, gvcf ->
+                                patientSampleIdMap = [:]
+                                patientSampleIdMap['idPatient'] = idPatient
+                                patientSampleIdMap['idSample'] = idSample
+                                [intervalBed.baseName, intervalBed, patientSampleIdMap , gvcf]}
+                                .groupTuple(by:[0])
+                                .map{interval_name, liIntervalBed, patientSampleIdMap, liGvcf -> 
+                                    [interval_name, liIntervalBed.first(), patientSampleIdMap, liGvcf]
+                                    }
+                                // .dump(tag: 'Collected HaplotypeCaller output')
+    
+    
     GenomicsDBImport(mapped_gvcf_GenotypeGVCFs)                              
     GenotypeGVCFs(GenomicsDBImport.out,
         ch_dbsnp,
@@ -337,14 +346,27 @@ workflow{
         ch_fasta_fai
     )
 
+    // ch_select_variants = GenotypeGVCFs.out.vcf_GenotypeGVCFs
+    // .flatMap{ caller, int_name, int_bed, li_id_patient, li_id_sample, vcf, vcf_idx ->
+    //     my_list=[]
+    //     li_id_patient.eachWithIndex { item, index ->
+    //         my_list.add([caller, li_id_patient[index], li_id_sample[index],  int_name, int_bed, vcf, vcf_idx])
+    //     }
+    //     my_list
+    // }
+    // GenotypeGVCFs.out.vcf_GenotypeGVCFs
+    // .dump(tag: 'vcf_GenotypeGVCFs output')
     ch_select_variants = GenotypeGVCFs.out.vcf_GenotypeGVCFs
-    .flatMap{ caller, int_name, int_bed, li_id_patient, li_id_sample, vcf, vcf_idx ->
-        my_list=[]
-        li_id_patient.eachWithIndex { item, index ->
-            my_list.add([caller, li_id_patient[index], li_id_sample[index],  int_name, int_bed, vcf, vcf_idx])
+    .flatMap{ caller, li_patient_sample_id_map, interval_bed,  vcf, vcf_idx ->
+        per_sample_list=[]
+        li_patient_sample_id_map.each { entry ->
+            per_sample_list.add([caller, entry.idPatient, entry.idSample, interval_bed, vcf, vcf_idx])
         }
-        my_list
+        per_sample_list
     }
+    // .flatten()
+    // .dump(tag: 'ch_select_variants')
+
     SelectVariants(ch_select_variants,
         ch_fasta,
         ch_fasta_fai,
@@ -1456,10 +1478,11 @@ process GenomicsDBImport {
     // publishDir "${OUT_DIR}/misc/genomicsdb/", mode: 'copy', overwrite: false
 
     input:
-    tuple val(interval_name), file(interval_bed), val(list_id_patient), val(list_id_sample), file(gvcfs)
+    // tuple val(interval_name), file(interval_bed), val(list_id_patient), val(list_id_sample), file(gvcfs)
+    tuple val(interval_name), file(interval_bed), val(patientSampleIdMap), file(gvcfs)
     
     output:
-    tuple val(interval_name), file(interval_bed), val(list_id_patient), val(list_id_sample), file ("${interval_name}.gdb")
+    tuple val(interval_name), file(interval_bed), val(patientSampleIdMap), file ("${interval_name}.gdb")
 
     when: 'haplotypecaller' in tools
 
@@ -1499,7 +1522,8 @@ process GenotypeGVCFs {
     label 'cpus_8'
     tag {interval_bed.baseName}
     input:
-        tuple val(interval_name), file(interval_bed), val(list_id_patient), val(list_id_sample), file(gdb)
+        // tuple val(interval_name), file(interval_bed), val(list_id_patient), val(list_id_sample), file(gdb)
+        tuple val(interval_name), file(interval_bed), val(patientSampleIdMap), file(gdb)
         file(dbsnp)
         file(dbsnpIndex)
         file(dict)
@@ -1507,7 +1531,8 @@ process GenotypeGVCFs {
         file(fastaFai)
 
     output:
-    tuple val("HaplotypeCaller"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.vcf"), emit: vcf_GenotypeGVCFs
+    // tuple val("HaplotypeCaller"), list_id_patient, list_id_sample, file("${interval_name}.vcf"), file("${interval_name}.vcf.idx"), emit: vcf_GenotypeGVCFs
+    tuple val("HaplotypeCaller"),  val(patientSampleIdMap), file(interval_bed), file("${interval_name}.vcf"), file("${interval_name}.vcf.idx"), emit: vcf_GenotypeGVCFs
     // tuple val("HaplotypeCaller_Jointly_Genotyped"), val(interval_name), file(interval_bed), val(list_id_patient), val(list_id_sample), file ("${interval_name}.vcf"), file ("${interval_name}.vcf.idx"), emit: vcf_GenotypeGVCFs
     
     when: 'haplotypecaller' in tools
@@ -1530,7 +1555,8 @@ process SelectVariants {
     label 'cpus_8'
     tag {interval_bed.baseName}
     input:
-        tuple val(caller), val(id_patient), val(id_sample), val(interval_name), file(interval_bed), file (vcf), file (vcf_idx)
+        // tuple val(caller), val(id_patient), val(id_sample), val(interval_name), file(interval_bed), file (vcf), file (vcf_idx)
+        tuple val(caller), val(id_patient), val(id_sample), file(interval_bed), file (vcf), file (vcf_idx)
         file(fasta)
         file(fastaFai)
         file(dict)
