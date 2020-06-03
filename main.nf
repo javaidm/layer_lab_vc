@@ -1475,6 +1475,7 @@ process GvcfToVcf{
 process GenomicsDBImport {
     label 'cpus_16'
     echo true
+    tag{interval_name}
     // publishDir "${OUT_DIR}/misc/genomicsdb/", mode: 'copy', overwrite: false
 
     input:
@@ -1488,6 +1489,7 @@ process GenomicsDBImport {
 
     script:
     sample_map="cohort_samples.map"
+    interval_name_with_underscore="${interval_name}_"
     // gDB = chr
     """
     for x in *.g.vcf
@@ -1499,9 +1501,8 @@ process GenomicsDBImport {
     for x in *.g.vcf.gz
     do
         
-        base_name=`basename \$x`
-        sample_with_ext=\${base_name##*_}
-        sample=\${sample_with_ext%%.*}
+        base_name=`basename \$x .g.vcf.gz`
+        sample=\${base_name#$interval_name_with_underscore}
         echo "\${sample}\t\${x}" >> ${sample_map}
     done
     
