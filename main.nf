@@ -10,6 +10,8 @@ _THREADS = 32
 /* Process the parameters and set the environemnt */
 params.name = 'Layer Lab DNA Seq Analysis Pipeline'
 params.tag = 'latest' // Default tag is latest, to be overwritten by --tag <version>
+// model= params.exome ? 'WES' : 'WGS'
+model= params.exome ? 'wes' : 'wgs'
 
 // Check if genome exists in the config file
 if (params.genomes && !params.genomes.containsKey(params.genome)) {
@@ -70,6 +72,11 @@ if (tsvPath) {
 // Initialize each params in params.genomes, catch the command line first if it was defined
 // params.fasta has to be the first one
 params.fasta = params.genome && !('annotate' in step) ? params.genomes[params.genome].fasta ?: null : null
+params.fasta_fai = params.genome && params.fasta ? params.genomes[params.genome].fasta_fai ?: null : null
+params.fasta_gz = params.genome && !('annotate' in step) ? params.genomes[params.genome].fasta_gz ?: null : null
+params.fasta_gz_fai = params.genome && params.fasta ? params.genomes[params.genome].fasta_gz_fai ?: null : null
+params.fasta_gzi = params.genome && !('annotate' in step) ? params.genomes[params.genome].fasta_gz_gzi ?: null : null
+
 // The rest can be sorted
 params.ac_loci = params.genome && 'ascat' in tools ? params.genomes[params.genome].ac_loci ?: null : null
 params.ac_loci_gc = params.genome && 'ascat' in tools ? params.genomes[params.genome].ac_loci_gc ?: null : null
@@ -79,7 +86,6 @@ params.chr_length = params.genome && 'controlfreec' in tools ? params.genomes[pa
 params.dbsnp = params.genome && ('mapping' in step || 'controlfreec' in tools || 'haplotypecaller' in tools || 'mutect2' in tools) ? params.genomes[params.genome].dbsnp ?: null : null
 params.dbsnp_index = params.genome && params.dbsnp ? params.genomes[params.genome].dbsnp_index ?: null : null
 params.dict = params.genome && params.fasta ? params.genomes[params.genome].dict ?: null : null
-params.fasta_fai = params.genome && params.fasta ? params.genomes[params.genome].fasta_fai ?: null : null
 params.germline_resource = params.genome && 'mutect2' in tools ? params.genomes[params.genome].germline_resource ?: null : null
 params.germline_resource_index = params.genome && params.germline_resource ? params.genomes[params.genome].germline_resource_index ?: null : null
 params.intervals = params.genome && !('annotate' in step) ? params.genomes[params.genome].intervals ?: null : null
@@ -171,11 +177,19 @@ printSummary()
 //     ch_input_pair_reads.
 //     subscribe{println (it)}
 // }
+
+
+
 workflow{
 
     GetSoftwareVersions()
     // First check if various indexes are provided, if not, create them
     BuildFastaFai(ch_fasta)
+    BuildFastaGz(ch_fasta)
+    BuildFastaGzFai(ch_fasta,
+                    BuildFastaGz.out)
+    BuildFastaGzi(BuildFastaGz.out)
+
     BuildBWAindexes(ch_fasta)
     BuildDict(ch_fasta)
     BuildDbsnpIndex(ch_dbsnp)
@@ -184,6 +198,12 @@ workflow{
     BuildPonIndex(ch_pon)
 
     ch_fasta_fai = params.fasta_fai ? Channel.value(file(params.fasta_fai)) : BuildFastaFai.out
+    // The following three mainly used by the DeepVariant
+    ch_fasta_gz = params.fasta_gz ? Channel.value(file(params.fasta_gz)) : BuildFastaGz.out
+    ch_fasta_gz_fai = params.fasta_gz_fai ? Channel.value(file(params.fasta_gz_fai)) : BuildFastaGzFai.out
+    ch_fasta_gzi = params.fasta_gzi ? Channel.value(file(params.fasta_gzi)) : BuildFastaGzi.out
+    // BuildFastaGzi.out
+    // .dump(tag: "gzi")
     // ch_bwa_index = params.bwa_index ? Channel.fromPath(params.bwa_index) : BuildBWAindexes.out
     ch_bwa_index = params.bwa_index ? Channel.value(file(params.bwa_index)) : BuildBWAindexes.out
     ch_dict = params.dict ? Channel.value(file(params.dict)) : BuildDict.out
@@ -239,6 +259,28 @@ workflow{
     // BamQC(bam_BamQC,
     //         ch_target_bed)
     IndexBamFile(ch_merged_bams)
+    // Google deepvariant related processes
+    // DV_Combined(IndexBamFile.out,
+    //             ch_fasta,
+    //             ch_fasta_fai,
+    //             ch_fasta_gz,
+    //             ch_fasta_gz_fai,
+    //             ch_fasta_gzi,
+    //             ch_target_bed)
+
+    DV_MakeExamples(IndexBamFile.out,
+                  ch_fasta,
+                ch_fasta_fai,
+                ch_fasta_gz,
+                ch_fasta_gz_fai,
+                ch_fasta_gzi,
+                ch_target_bed)
+    DV_CallVariants(DV_MakeExamples.out.shared_examples)
+    DV_PostprocessVariants(DV_CallVariants.out.variant_tf_records,
+                            ch_fasta_gz,
+                            ch_fasta_gz_fai,
+                            ch_fasta_gzi)
+
     MarkDuplicates(ch_merged_bams)
     // Sambamba_MD(ch_merged_bams)
     md_bams = MarkDuplicates.out.marked_bams.combine(ch_bed_intervals)
@@ -539,7 +581,20 @@ workflow.onComplete {
 	println ( workflow.success ? "Done!" : "Oops .. something went wrong" )
 }
 
-
+// workflow WF_DeepVariant{
+//     // take: tuple ch_fasta, ch_fasta_fai, ch_fasta_gz, ch_fasta_gz_fai, ch_fasta_gzi, ch_bams
+//     DV_MakeExamples(IndexBamFile.out,
+//                         ch_fasta_fai,
+//                         ch_fasta_gz,
+//                         ch_fasta_gz_fai,
+//                         ch_fasta_gzi,
+//                         ch_target_bed)
+//         DV_CallVariants(DV_MakeExamples.out.shared_examples)
+//         DV_PostprocessVariants(DV_CallVariants.out.variant_tf_records,
+//                                  ch_fasta_gz,
+//                                 ch_fasta_gz_fai,
+//                                 ch_fasta_gzi)
+// }
 
 // }
 /******************************************************************************************/
@@ -665,8 +720,8 @@ def helpMessage() {
         --monochrome_logs           Logs will be without colors
         --email                     Set this parameter to your e-mail address to get a summary e-mail with details of the run sent to you when the workflow exits
         --max_multiqc_email_file_size   Theshold size for MultiQC report to be attached in notification email. If file generated by pipeline exceeds the threshold, it will not be attached (Default: 25MB)
+        --exome                     Specify when dealing with WES data, used when calling germline variants using Google deepvariant
         -name                       Name for the pipeline run. If not specified, Nextflow will automatically generate a random mnemonic
-
     AWSBatch options:
         --awsqueue                  The AWSBatch JobQueue that needs to be set when running on AWSBatch
         --awsregion                 The AWS Region for your AWS Batch job to run on
@@ -722,6 +777,57 @@ process GetSoftwareVersions {
 */
 
 // And then initialize channels based on params or indexes that were just built
+process BuildFastaGz {
+      tag "${fasta}.gz"
+    //   publishDir "$baseDir/sampleDerivatives"
+
+      input:
+      file(fasta)
+
+      output:
+      file("${fasta}.gz")
+      
+      when: !(params.fasta_gz)
+      script:
+      """
+      bgzip -c ${fasta} > ${fasta}.gz
+      """
+}
+
+process BuildFastaGzFai {
+    tag "${fasta}.gz.fai"
+    // publishDir "$baseDir/sampleDerivatives"
+
+    input:
+    file(fasta)
+    file(fastagz)
+
+    output:
+    file("${fasta}.gz.fai")
+    when: !(params.fasta_gz_fai)
+    script:
+    """
+    samtools faidx $fastagz
+    """
+  }
+  
+process BuildFastaGzi {
+    tag "${fasta}.gz.gzi"
+    // publishDir "$baseDir/sampleDerivatives"
+
+    input:
+    file(fasta)
+
+    output:
+    file("${fasta}.gz.gzi")
+    
+    when: !(params.fasta_gzi)
+
+    script:
+    """
+    bgzip -c -i ${fasta} > ${fasta}.gz
+    """
+  }
 
 process BuildBWAindexes {
     tag {fasta}
@@ -1632,7 +1738,7 @@ process HapPy {
     output:
         file("hap_py.${vcf.baseName}.*")
 
-    when: (('haplotypecaller' in tools || 'mutect2' in tools || 'freebayes' in tools) && 
+    when: (('haplotypecaller' in tools || 'mutect2' in tools || 'freebayes' in tools || 'deepvariant' in tools) && 
             params.giab_highconf && params.giab_highconf_tbi && chco_highqual_snps && bn.contains('GIAB'))
 
     script:
@@ -1647,18 +1753,245 @@ process HapPy {
     """
 }
 
-process PrintCh{
-    echo true
+/*
+================================================================================
+                               Google Deepvariant  for Germline variant calling
+================================================================================
+*/
+
+/********************************************************************
+  process make_examples
+  Getting bam files and converting them to images ( named examples )
+********************************************************************/
+
+process DV_Combined{
+    label "cpus_max"
+    tag "${bam}"
+    publishDir "${params.outdir}/VariantCalling/${idSample}/DeepVariant", mode: params.publish_dir_mode
     
     input:
-    file(in_ch)
+    tuple idPatient, idSample, file(bam), file(bai)
+    file (fasta)
+    file (fai )
+    file (fastagz)
+    file (gzfai)
+    file (gzi)
+    file (target_bed)
+    
+    output:
+        tuple idPatient, idSample, file("${bam.baseName}.vcf")
+        file("*.html")
+
+    when: 'deepvariant' in tools
+    
     script:
     """
-    echo "PrintCh()"
-    pwd
-    ls -al 
+    /opt/deepvariant/bin/run_deepvariant \
+    --model_type ${model} \
+    --ref ${fasta} \
+    --reads ${bam} \
+     --regions ${target_bed} \
+    --output_vcf "${bam.baseName}.vcf" \
+    --num_shards ${task.cpus}
     """
 }
+
+process DV_MakeExamples{
+    label 'cpus_32'
+    tag "${bam}"
+    publishDir "${params.outdir}/Preprocessing/${idSample}/DV_MakeExamples/", mode: params.publish_dir_mode,
+    saveAs: {filename -> "logs/log"}
+
+    input:
+    tuple idPatient, idSample, file(bam), file(bai)
+    file (fasta)
+    file (fai )
+    file (fastagz)
+    file (gzfai)
+    file (gzi)
+    file (target_bed)
+
+    output:
+    tuple idPatient, idSample, file(bam), file('*_shardedExamples'), emit: shared_examples
+    when: 'deepvariant' in tools
+    script:
+    // sharded_folder = "${bam}.tfrecord@${task.cpus}.gz"
+    """
+    mkdir logs
+    mkdir ${bam.baseName}_shardedExamples
+    dv_make_examples.py \
+    --cores ${task.cpus} \
+    --sample ${bam} \
+    --ref ${fastagz} \
+    --reads ${bam} \
+    --regions ${target_bed} \
+    --logdir logs \
+    --examples ${bam.baseName}_shardedExamples
+
+    """
+}
+
+/********************************************************************
+  process call_variants
+  Doing the variant calling based on the ML trained model.
+********************************************************************/
+
+process DV_CallVariants{
+   label 'cpus_32'
+  tag "${bam}"
+
+  input:
+  tuple idPatient, idSample, file(bam), file(shardedExamples)
+
+  output:
+  tuple idPatient, idSample, file(bam), file('*_call_variants_output.tfrecord'), emit: variant_tf_records
+  
+
+  when: 'deepvariant' in tools
+  script:
+  """
+    dv_call_variants.py \
+    --cores ${task.cpus} \
+    --sample ${bam} \
+    --outfile ${bam.baseName}_call_variants_output.tfrecord \
+    --examples $shardedExamples \
+    --model ${model}
+
+  """
+}
+
+
+
+/********************************************************************
+  process postprocess_variants
+  Trasforming the variant calling output (tfrecord file) into a standard vcf file.
+********************************************************************/
+
+process DV_PostprocessVariants{
+
+  label 'cpus_32'
+  tag "${bam}"
+  publishDir "${params.outdir}/VariantCalling/${idSample}/DeepVariant", mode: params.publish_dir_mode
+
+  input:
+  tuple idPatient, idSample, file(bam), file(call_variants_tfrecord)
+//   set file(bam),file('call_variants_output.tfrecord') from called_variants
+  file fastagz
+  file gzfai
+  file gzi
+
+  output:
+   tuple idPatient, idSample, file("${idSample}.vcf.gz"), file("${idSample}.vcf.gz.tbi") , emit: vcfs
+   file("${idSample}.*.html")
+
+  when: 'deepvariant' in tools
+  script:
+  """
+  dv_postprocess_variants.py \
+  --ref ${fastagz} \
+  --infile ${call_variants_tfrecord} \
+  --outfile "${idSample}.vcf" \
+
+  bgzip "${idSample}.vcf"
+  tabix -p vcf "${idSample}.vcf.gz"
+  """
+}
+// process DV_MakeExamples{
+//     tag "${bam}"
+//     publishDir "${params.outdir}/Preprocessing/${idSample}/DV_MakeExamples/", mode: params.publish_dir_mode,
+//     saveAs: {filename -> "logs/log"}
+
+//     input:
+//     tuple idPatient, idSample, file(bam), file(bai)
+//     file fai 
+//     file fastagz
+//     file gzfai
+//     file gzi
+//     file target_bed
+
+//     output:
+//     tuple idPatient, idSample, file(bam), file('*_shardedExamples'), emit: shared_examples
+//     // when: 'deepvariant' in tools
+//     script:
+//     """
+//     mkdir logs
+//     mkdir ${bam.baseName}_shardedExamples
+//     /opt/deepvariant/bin/make_examples \
+//     --sample_name ${idSample} \
+//     --ref ${fastagz} \
+//     --reads ${bam} \
+//     --mode calling \
+//     --regions ${target_bed} \
+//     --log_dir logs \
+//     --examples ${bam.baseName}_shardedExamples
+//     """
+// }
+
+// /********************************************************************
+//   process call_variants
+//   Doing the variant calling based on the ML trained model.
+// ********************************************************************/
+
+// process DV_CallVariants{
+
+//   tag "${bam}"
+
+//   input:
+//   tuple idPatient, idSample, file(bam), file(shardedExamples)
+
+//   output:
+//   tuple idPatient, idSample, file(bam), file('*_call_variants_output.tfrecord'), emit: variant_tf_records
+
+//   script:
+//   when: 'deepvariant' in tools
+//   """
+//   /opt/deepvariant/bin/call_variants \
+//     --cores ${task.cpus} \
+//     --sample ${bam} \
+//     --outfile ${bam.baseName}_call_variants_output.tfrecord \
+//     --examples $shardedExamples \
+//     --model ${model}
+//   """
+// }
+
+
+
+// /********************************************************************
+//   process postprocess_variants
+//   Trasforming the variant calling output (tfrecord file) into a standard vcf file.
+// ********************************************************************/
+
+// process DV_PostprocessVariants{
+
+//   tag "${bam}"
+
+//   publishDir "${params.outdir}/VariantCalling/${idSample}/DeepVariant", mode: params.publish_dir_mode
+
+//   input:
+//   tuple idPatient, idSample, file(bam), file(call_variants_tfrecord)
+// //   set file(bam),file('call_variants_output.tfrecord') from called_variants
+//   file fastagz
+//   file gzfai
+//   file gzi
+
+//   output:
+//    tuple idPatient, idSample, file("${bam}.vcf"), emit: vcfs
+//   when: 'deepvariant' in tools
+//   script:
+//   """
+//   /opt/deepvariant/bin/postprocess_variants \
+//   --ref ${fastagz} \
+//   --infile ${call_variants_tfrecord} \
+//   --outfile "${bam}.vcf"
+//   """
+// }
+
+/*
+================================================================================
+                               Copy Number callers
+================================================================================
+*/
+
 // STEP STRELKA.1 - SINGLE MODE
 
 process StrelkaSingle {
@@ -1854,6 +2187,8 @@ process Vcftools {
     --out ${reduceVCF(vcf.fileName)}
     """
 }
+
+
 
 
 /*
@@ -2156,6 +2491,10 @@ def printSummary(){
 
     if (params.fasta)                 summary['fasta']                 = params.fasta
     if (params.fasta_fai)              summary['fasta_fai']              = params.fasta_fai
+    if (params.fasta_gz)              summary['fasta_gz']              = params.fasta_gz
+    if (params.fasta_gz_fai)          summary['fasta_gz_fai']        = params.fasta_gzi
+    if (params.fasta_gzi)              summary['fasta_gzi']              = params.fasta_gzi
+
     if (params.dict)                  summary['dict']                  = params.dict
     if (params.bwa_index)              summary['bwa_index']              = params.bwa_index
     if (params.germline_resource)      summary['germline_resource']      = params.germline_resource
@@ -2193,6 +2532,8 @@ def printSummary(){
         summary['E-mail Address']        = params.email
         summary['MultiQC maxsize']       = params.maxMultiqcEmailFileSize
     }
+    params.properties.each { log.info "${it.key} -> ${it.value}" }
+    log.info params.dump()
     log.info summary.collect { k, v -> "${k.padRight(18)}: $v" }.join("\n")
     if (params.monochrome_logs) log.info "----------------------------------------------------"
     else log.info "\033[2m----------------------------------------------------\033[0m"
@@ -2297,6 +2638,7 @@ def defineToolList() {
         'dnaseq',
         'freebayes',
         'haplotypecaller',
+        'deepvariant',
         'manta',
         'merge',
         'mpileup',
