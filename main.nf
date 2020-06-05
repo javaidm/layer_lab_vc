@@ -75,7 +75,25 @@ params.fasta = params.genome && !('annotate' in step) ? params.genomes[params.ge
 params.fasta_fai = params.genome && params.fasta ? params.genomes[params.genome].fasta_fai ?: null : null
 params.fasta_gz = params.genome && !('annotate' in step) ? params.genomes[params.genome].fasta_gz ?: null : null
 params.fasta_gz_fai = params.genome && params.fasta ? params.genomes[params.genome].fasta_gz_fai ?: null : null
-params.fasta_gzi = params.genome && !('annotate' in step) ? params.genomes[params.genome].fasta_gz_gzi ?: null : null
+params.fasta_gzi = params.genome && !('annotate' in step) ? params.genomes[params.genome].fasta_gzi ?: null : null
+
+// Annotation related params (snpEff)
+params.snpEff_db = params.genome && ('annotate' in step) ? params.genomes[params.genome].snpEff_db ?: null : null
+params.snpEff_cache = params.genome && ('annotate' in step) ? params.genomes[params.genome].snpEff_cache ?: null : null
+params.species = params.genome && ('annotate' in step) ? params.genomes[params.genome].species ?: null : null
+// VEP
+params.vep_cache = params.genome && ('annotate' in step) ? params.genomes[params.genome].vep_cache ?: null : null
+params.vep_cache_version = params.genome && ('annotate' in step) ? params.genomes[params.genome].vep_cache_version ?: null : null
+// CADD
+params.cadd_InDels = params.genome && ('annotate' in step) ? params.genomes[params.genome].cadd_InDels ?: null : null
+params.cadd_InDels_tbi = params.genome && ('annotate' in step) ? params.genomes[params.genome].cadd_InDels_tbi ?: null : null
+params.cadd_WG_SNVs = params.genome && ('annotate' in step) ? params.genomes[params.genome].cadd_WG_SNVs ?: null : null
+params.cadd_WG_SNVs_tbi = params.genome && ('annotate' in step) ? params.genomes[params.genome].cadd_WG_SNVs_tbi ?: null : null
+// CHCO related Pipeline validation using Illumina Hap.py package. GIAB truth sets
+params.giab_highconf = params.genome ? params.genomes[params.genome].giab_highconf ?: null : null
+params.giab_highconf_tbi = params.genome ? params.genomes[params.genome].giab_highconf_tbi ?: null : null
+params.chco_highqual_snps = params.genome ? params.genomes[params.genome].chco_highqual_snps ?: null : null
+
 
 // The rest can be sorted
 params.ac_loci = params.genome && 'ascat' in tools ? params.genomes[params.genome].ac_loci ?: null : null
@@ -253,20 +271,9 @@ workflow{
     }
     MergeBamMapped(ch_multiple_bams)
     ch_merged_bams = MergeBamMapped.out.mix(ch_single_bams)
-    // bam_BamQC = bam_recal_qc.mix(MapReads.out.bam_mapped_BamQC)
-    // // bam_BamQC
-    // // .subscribe{ log.info(it)}
-    // BamQC(bam_BamQC,
-    //         ch_target_bed)
+   
     IndexBamFile(ch_merged_bams)
-    // Google deepvariant related processes
-    // DV_Combined(IndexBamFile.out,
-    //             ch_fasta,
-    //             ch_fasta_fai,
-    //             ch_fasta_gz,
-    //             ch_fasta_gz_fai,
-    //             ch_fasta_gzi,
-    //             ch_target_bed)
+   
 
     DV_MakeExamples(IndexBamFile.out,
                   ch_fasta,
@@ -434,12 +441,27 @@ workflow{
     ConcatVCF(vcf_ConcatenateVCFs,
         ch_fasta_fai,
         ch_target_bed)
-    HapPy(ConcatVCF.out.vcf_concatenated,
+    // Create a channel to hold GIAB samples for validation using hap.py
+    ch_vcfs_hap_py = Channel.empty()
+                    .mix(
+                        //   DV_PostprocessVariants.out.vcf
+                        // only keep individually genotyped vcfs
+                          ConcatVCF.out.vcf_concatenated
+                          .filter{  "${it[0]}" == 'HaplotypeCaller_Jointly_Genotyped' }
+                        )
+                    .filter{
+                        // The sampleID is the 3rd component of the channel elements
+                        "${it[2]}".contains('GIAB')
+                    }
+                    .dump(tag: "Channel for Hap_py")
+    
+    HapPy(ch_vcfs_hap_py,
           ch_giab_highconf,
           ch_giab_highconf_tbi,
           ch_chco_highqual_snps,
           ch_fasta,
           ch_fasta_fai)
+    
     BcftoolsStats(ConcatVCF.out.vcf_concatenated_to_annotate)
     Vcftools(ConcatVCF.out.vcf_concatenated_to_annotate)
 
@@ -581,22 +603,7 @@ workflow.onComplete {
 	println ( workflow.success ? "Done!" : "Oops .. something went wrong" )
 }
 
-// workflow WF_DeepVariant{
-//     // take: tuple ch_fasta, ch_fasta_fai, ch_fasta_gz, ch_fasta_gz_fai, ch_fasta_gzi, ch_bams
-//     DV_MakeExamples(IndexBamFile.out,
-//                         ch_fasta_fai,
-//                         ch_fasta_gz,
-//                         ch_fasta_gz_fai,
-//                         ch_fasta_gzi,
-//                         ch_target_bed)
-//         DV_CallVariants(DV_MakeExamples.out.shared_examples)
-//         DV_PostprocessVariants(DV_CallVariants.out.variant_tf_records,
-//                                  ch_fasta_gz,
-//                                 ch_fasta_gz_fai,
-//                                 ch_fasta_gzi)
-// }
 
-// }
 /******************************************************************************************/
                                 /* Helper functions */
 /******************************************************************************************/
@@ -672,10 +679,12 @@ def helpMessage() {
                                     Available: Mapping, Recalibrate, VariantCalling, Annotate
                                     Default: Mapping
         --tools                     Specify tools to use for variant calling:
-                                    Available: ASCAT, ControlFREEC, FreeBayes, HaplotypeCaller
+                                    Available: ASCAT, ControlFREEC, FreeBayes, HaplotypeCaller, DeepVariant
                                     Manta, mpileup, Mutect2, Strelka, TIDDIT
                                     and/or for annotation:
                                     snpEff, VEP, merge
+                                    and for pipline validation (if you have added GIAB samples):
+                                    hap_py
                                     Default: None
         --skip_qc                   Specify which QC tools to skip when running Sarek
                                     Available: all, bamQC, BCFtools, FastQC, MultiQC, samtools, vcftools, versions
@@ -1720,17 +1729,25 @@ process ConcatVCF {
     """
 }
 
+
+/*
+================================================================================
+                               Pipeline Benchmarking using Illumina Hap.py
+================================================================================
+*/
 process HapPy {
     label 'cpus_32'
 
     tag {idSample}
 
-    publishDir "${params.outdir}/Reports/${idSample}/hap_py", mode: params.publish_dir_mode
+    publishDir "${params.outdir}/Validation/${idSample}/${variantCaller}", mode: params.publish_dir_mode
 
     input:
         tuple variantCaller, idPatient, idSample, file(vcf), file(tbi)
         file(giab_highconf)
         file(giab_highconf_tbi)
+        // file(target_bed)
+        // file(regions_bed)
         file(highqual_snps)
         file(fasta)
         file(fastaFai)
@@ -1738,18 +1755,23 @@ process HapPy {
     output:
         file("hap_py.${vcf.baseName}.*")
 
-    when: (('haplotypecaller' in tools || 'mutect2' in tools || 'freebayes' in tools || 'deepvariant' in tools) && 
-            params.giab_highconf && params.giab_highconf_tbi && chco_highqual_snps && bn.contains('GIAB'))
+    // when: ( 'hap_py' in tools
+    //         && ('haplotypecaller' in tools || 'mutect2' in tools || 'freebayes' in tools || 'deepvariant' in tools) 
+    //         && params.giab_highconf 
+    //         && params.giab_highconf_tbi 
+    //         && chco_highqual_snps)
 
     script:
-    bn = "{vcf.baseName}"
+    // bn = "{vcf.baseName}"
     """
     export HGREF=$fasta
+    mkdir scratch
     hap.py  \
-      $giab_highconf \
-      $vcf \
-      -f $highqual_snps \
-      -o hap_py.${vcf.baseName}
+        $giab_highconf \
+        $vcf \
+        -f $highqual_snps \
+        --scratch-prefix scratch \
+        -o hap_py.${vcf.baseName}
     """
 }
 
@@ -1881,8 +1903,10 @@ process DV_PostprocessVariants{
   file gzi
 
   output:
-   tuple idPatient, idSample, file("${idSample}.vcf.gz"), file("${idSample}.vcf.gz.tbi") , emit: vcfs
-   file("${idSample}.*.html")
+   tuple val('DeepVariant'), idPatient, idSample, file("${idSample}.vcf.gz"), file("${idSample}.vcf.gz.tbi") , emit: vcf
+   tuple val('DeepVariant'), idSample, file("${idSample}.vcf.gz") , emit: vcf_to_annotate
+//    file("${idSample}.*.html"), emit: html_report
+   file('*.html')
 
   when: 'deepvariant' in tools
   script:
@@ -1896,95 +1920,6 @@ process DV_PostprocessVariants{
   tabix -p vcf "${idSample}.vcf.gz"
   """
 }
-// process DV_MakeExamples{
-//     tag "${bam}"
-//     publishDir "${params.outdir}/Preprocessing/${idSample}/DV_MakeExamples/", mode: params.publish_dir_mode,
-//     saveAs: {filename -> "logs/log"}
-
-//     input:
-//     tuple idPatient, idSample, file(bam), file(bai)
-//     file fai 
-//     file fastagz
-//     file gzfai
-//     file gzi
-//     file target_bed
-
-//     output:
-//     tuple idPatient, idSample, file(bam), file('*_shardedExamples'), emit: shared_examples
-//     // when: 'deepvariant' in tools
-//     script:
-//     """
-//     mkdir logs
-//     mkdir ${bam.baseName}_shardedExamples
-//     /opt/deepvariant/bin/make_examples \
-//     --sample_name ${idSample} \
-//     --ref ${fastagz} \
-//     --reads ${bam} \
-//     --mode calling \
-//     --regions ${target_bed} \
-//     --log_dir logs \
-//     --examples ${bam.baseName}_shardedExamples
-//     """
-// }
-
-// /********************************************************************
-//   process call_variants
-//   Doing the variant calling based on the ML trained model.
-// ********************************************************************/
-
-// process DV_CallVariants{
-
-//   tag "${bam}"
-
-//   input:
-//   tuple idPatient, idSample, file(bam), file(shardedExamples)
-
-//   output:
-//   tuple idPatient, idSample, file(bam), file('*_call_variants_output.tfrecord'), emit: variant_tf_records
-
-//   script:
-//   when: 'deepvariant' in tools
-//   """
-//   /opt/deepvariant/bin/call_variants \
-//     --cores ${task.cpus} \
-//     --sample ${bam} \
-//     --outfile ${bam.baseName}_call_variants_output.tfrecord \
-//     --examples $shardedExamples \
-//     --model ${model}
-//   """
-// }
-
-
-
-// /********************************************************************
-//   process postprocess_variants
-//   Trasforming the variant calling output (tfrecord file) into a standard vcf file.
-// ********************************************************************/
-
-// process DV_PostprocessVariants{
-
-//   tag "${bam}"
-
-//   publishDir "${params.outdir}/VariantCalling/${idSample}/DeepVariant", mode: params.publish_dir_mode
-
-//   input:
-//   tuple idPatient, idSample, file(bam), file(call_variants_tfrecord)
-// //   set file(bam),file('call_variants_output.tfrecord') from called_variants
-//   file fastagz
-//   file gzfai
-//   file gzi
-
-//   output:
-//    tuple idPatient, idSample, file("${bam}.vcf"), emit: vcfs
-//   when: 'deepvariant' in tools
-//   script:
-//   """
-//   /opt/deepvariant/bin/postprocess_variants \
-//   --ref ${fastagz} \
-//   --infile ${call_variants_tfrecord} \
-//   --outfile "${bam}.vcf"
-//   """
-// }
 
 /*
 ================================================================================
@@ -2204,7 +2139,7 @@ process SnpEff {
     // cache false
     publishDir params.outdir, mode: params.publish_dir_mode, saveAs: {
         if (it == "${reducedVCF}_snpEff.ann.vcf") null
-        else "Reports/${idSample}/snpEff/${it}"
+        else "Reports/${idSample}/snpEff/${variantCaller}/${it}"
     }
 
     input:
@@ -2246,7 +2181,7 @@ process SnpEff {
 process CompressVCFsnpEff {
     tag {"${idSample} - ${vcf}"}
 
-    publishDir "${params.outdir}/Annotation/${idSample}/snpEff", mode: params.publish_dir_mode
+    publishDir "${params.outdir}/Annotation/${idSample}/snpEff/${variantCaller}", mode: params.publish_dir_mode
 
     input:
         tuple variantCaller, idSample, file(vcf)
@@ -2271,7 +2206,7 @@ process VEP {
     tag {"${idSample} - ${variantCaller} - ${vcf}"}
 
     publishDir params.outdir, mode: params.publish_dir_mode, saveAs: {
-        if (it == "${reducedVCF}_VEP.summary.html") "Reports/${idSample}/VEP/${it}"
+        if (it == "${reducedVCF}_VEP.summary.html") "Reports/${idSample}/VEP/${variantCaller}/${it}"
         else null
     }
 
@@ -2337,7 +2272,7 @@ process VEPmerge {
     tag {"${idSample} - ${variantCaller} - ${vcf}"}
 
     publishDir params.outdir, mode: params.publish_dir_mode, saveAs: {
-        if (it == "${reducedVCF}_VEP.summary.html") "Reports/${idSample}/VEP/${it}"
+        if (it == "${reducedVCF}_VEP.summary.html") "Reports/${idSample}/VEP/${variantCaller}/${it}"
         else null
     }
 
@@ -2398,7 +2333,8 @@ process VEPmerge {
 process CompressVCFvep {
     tag {"${idSample} - ${vcf}"}
 
-    publishDir "${params.outdir}/Annotation/${idSample}/VEP", mode: params.publish_dir_mode
+    publishDir "${params.outdir}/Annotation/${idSample}/VEP/${variantCaller}", 
+    mode: params.publish_dir_mode
 
     input:
         tuple variantCaller, idSample, file(vcf) 
@@ -2492,7 +2428,7 @@ def printSummary(){
     if (params.fasta)                 summary['fasta']                 = params.fasta
     if (params.fasta_fai)              summary['fasta_fai']              = params.fasta_fai
     if (params.fasta_gz)              summary['fasta_gz']              = params.fasta_gz
-    if (params.fasta_gz_fai)          summary['fasta_gz_fai']        = params.fasta_gzi
+    if (params.fasta_gz_fai)          summary['fasta_gz_fai']        = params.fasta_fai
     if (params.fasta_gzi)              summary['fasta_gzi']              = params.fasta_gzi
 
     if (params.dict)                  summary['dict']                  = params.dict
@@ -2511,12 +2447,13 @@ def printSummary(){
     if (params.snpEff_db)              summary['snpEff_db']              = params.snpEff_db
     if (params.species)               summary['species']               = params.species
     if (params.vep_cache_version)       summary['vep_cache_version']       = params.vep_cache_version
-    // if (params.species)               summary['species']               = params.species
+    if (params.species)               summary['species']               = params.species
     if (params.snpEff_cache)          summary['snpEff_cache']          = params.snpEff_cache
     if (params.vep_cache)             summary['vep_cache']             = params.vep_cache
     if (params.cadd_InDels)            summary['cadd_InDels']          = params.cadd_InDels
-    if (params.cadd_InDels_tbi)            summary['cadd_InDels_tbi']          = params.cadd_InDels_tbi
     if (params.cadd_WG_SNVs)            summary['cadd_WG_SNVs']          = params.cadd_WG_SNVs
+    if (params.giab_highconf)            summary['GIAB Truth Set']          = params.giab_highconf
+    if (params.chco_highqual_snps)     summary['Children Colorado hig quality SNPs'] = params.chco_highqual_snps
     if (params.cadd_WG_SNVs_tbi)            summary['cadd_WG_SNVs_tbi']          = params.cadd_WG_SNVs_tbi
     
 
@@ -2532,7 +2469,7 @@ def printSummary(){
         summary['E-mail Address']        = params.email
         summary['MultiQC maxsize']       = params.maxMultiqcEmailFileSize
     }
-    params.properties.each { log.info "${it.key} -> ${it.value}" }
+    // params.properties.each { log.info "${it.key} -> ${it.value}" }
     log.info params.dump()
     log.info summary.collect { k, v -> "${k.padRight(18)}: $v" }.join("\n")
     if (params.monochrome_logs) log.info "----------------------------------------------------"
@@ -2639,6 +2576,7 @@ def defineToolList() {
         'freebayes',
         'haplotypecaller',
         'deepvariant',
+        'hap_py',
         'manta',
         'merge',
         'mpileup',
