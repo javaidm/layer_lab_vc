@@ -90,8 +90,9 @@ params.cadd_InDels_tbi = params.genome && ('annotate' in step) ? params.genomes[
 params.cadd_WG_SNVs = params.genome && ('annotate' in step) ? params.genomes[params.genome].cadd_WG_SNVs ?: null : null
 params.cadd_WG_SNVs_tbi = params.genome && ('annotate' in step) ? params.genomes[params.genome].cadd_WG_SNVs_tbi ?: null : null
 // CHCO related Pipeline validation using Illumina Hap.py package. GIAB truth sets
-params.giab_highconf = params.genome ? params.genomes[params.genome].giab_highconf ?: null : null
+params.giab_highconf_vcf = params.genome ? params.genomes[params.genome].giab_highconf_vcf ?: null : null
 params.giab_highconf_tbi = params.genome ? params.genomes[params.genome].giab_highconf_tbi ?: null : null
+params.giab_highconf_regions = params.genome ? params.genomes[params.genome].giab_highconf_regions ?: null : null
 params.chco_highqual_snps = params.genome ? params.genomes[params.genome].chco_highqual_snps ?: null : null
 
 
@@ -165,8 +166,9 @@ ch_cadd_WG_SNVs = params.cadd_WG_SNVs ? Channel.value(file(params.cadd_WG_SNVs))
 ch_cadd_WG_SNVs_tbi = params.cadd_WG_SNVs_tbi ? Channel.value(file(params.cadd_WG_SNVs_tbi)) : "null"
 
 // Optional CHCO files for calculating TP, FP, TN etc against the GIAB
-ch_giab_highconf = params.giab_highconf ? Channel.value(file(params.giab_highconf)) : "null"
+ch_giab_highconf_vcf = params.giab_highconf_vcf ? Channel.value(file(params.giab_highconf_vcf)) : "null"
 ch_giab_highconf_tbi = params.giab_highconf_tbi ? Channel.value(file(params.giab_highconf_tbi)) : "null"
+ch_giab_highconf_regions = params.giab_highconf_regions ? Channel.value(file(params.giab_highconf_regions)) : "null"
 ch_chco_highqual_snps = params.chco_highqual_snps ? Channel.value(file(params.chco_highqual_snps)) : "null"
 
 printSummary()
@@ -444,7 +446,7 @@ workflow{
     // Create a channel to hold GIAB samples for validation using hap.py
     ch_vcfs_hap_py = Channel.empty()
                     .mix(
-                        //   DV_PostprocessVariants.out.vcf
+                          DV_PostprocessVariants.out.vcf,
                         // only keep individually genotyped vcfs
                           ConcatVCF.out.vcf_concatenated
                           .filter{  "${it[0]}" == 'HaplotypeCaller_Jointly_Genotyped' }
@@ -456,11 +458,14 @@ workflow{
                     .dump(tag: "Channel for Hap_py")
     
     HapPy(ch_vcfs_hap_py,
-          ch_giab_highconf,
+          ch_giab_highconf_vcf,
           ch_giab_highconf_tbi,
-          ch_chco_highqual_snps,
+          ch_giab_highconf_regions,
+          ch_target_bed,
+          ch_bait_bed,
           ch_fasta,
-          ch_fasta_fai)
+          ch_fasta_fai
+          )
     
     BcftoolsStats(ConcatVCF.out.vcf_concatenated_to_annotate)
     Vcftools(ConcatVCF.out.vcf_concatenated_to_annotate)
@@ -1073,10 +1078,12 @@ process FastQCFQ {
 
     tag {idPatient + "-" + idRun}
 
-    publishDir "${params.outdir}/Reports/${idSample}/FastQC/${idSample}_${idRun}", mode: params.publish_dir_mode
+    publishDir "${params.outdir}/Reports/${idSample}/FastQC/${idSample}_${idRun}", 
+    mode: params.publish_dir_mode
 
     input:
-        tuple idPatient, idSample, idRun, file("${idSample}_${idRun}_R1.fastq.gz"), file("${idSample}_${idRun}_R2.fastq.gz")
+        tuple idPatient, idSample, idRun, file("${idSample}_${idRun}_R1.fastq.gz"), 
+        file("${idSample}_${idRun}_R2.fastq.gz")
 
     output:
         file("*.{html,zip}")
@@ -1236,7 +1243,7 @@ process MarkDuplicates {
 
 process BaseRecalibrator {
     // label 'cpus_1'
-    label 'cpus_2'
+    label 'cpus_8'
     // cache false
     // label 'memory_max'
     tag {idPatient + "-" + idSample + "-" + intervalBed.baseName}
@@ -1283,7 +1290,7 @@ process BaseRecalibrator {
 
 process GatherBQSRReports {
     label 'memory_singleCPU_2_task'
-    label 'cpus_2'
+    label 'cpus_8'
     echo true
     tag {idPatient + "-" + idSample}
 
@@ -1312,7 +1319,7 @@ process GatherBQSRReports {
 
 process ApplyBQSR {
     label 'memory_singleCPU_2_task'
-    label 'cpus_2'
+    label 'cpus_8'
     // label 'cpus_32'
     // label 'memory_max'
     tag {idPatient + "-" + idSample + "-" + intervalBed.baseName}
@@ -1519,7 +1526,7 @@ process CollectHsMetrics{
 
 process HaplotypeCaller {
     label 'memory_singleCPU_task_sq'
-    label 'cpus_2'
+    label 'cpus_8'
     // label 'memory_max'
     // label 'cpus_max'
 
@@ -1744,11 +1751,11 @@ process HapPy {
 
     input:
         tuple variantCaller, idPatient, idSample, file(vcf), file(tbi)
-        file(giab_highconf)
+        file(giab_highconf_vcf)
         file(giab_highconf_tbi)
-        // file(target_bed)
-        // file(regions_bed)
-        file(highqual_snps)
+        file(giab_highqual_regions)
+        file(target_bed)
+        file(bait_bed)
         file(fasta)
         file(fastaFai)
 
@@ -1767,10 +1774,13 @@ process HapPy {
     export HGREF=$fasta
     mkdir scratch
     hap.py  \
-        $giab_highconf \
+        $giab_highconf_vcf \
         $vcf \
-        -f $highqual_snps \
+        -f $giab_highqual_regions \
         --scratch-prefix scratch \
+        --engine vcfeval \
+        -T $target_bed \
+        --threads ${task.cpus} \
         -o hap_py.${vcf.baseName}
     """
 }
@@ -1819,7 +1829,7 @@ process DV_Combined{
 }
 
 process DV_MakeExamples{
-    label 'cpus_32'
+    label 'cpus_max'
     tag "${bam}"
     publishDir "${params.outdir}/Preprocessing/${idSample}/DV_MakeExamples/", mode: params.publish_dir_mode,
     saveAs: {filename -> "logs/log"}
@@ -1859,7 +1869,7 @@ process DV_MakeExamples{
 ********************************************************************/
 
 process DV_CallVariants{
-   label 'cpus_32'
+   label 'cpus_max'
   tag "${bam}"
 
   input:
