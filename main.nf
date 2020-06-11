@@ -253,7 +253,37 @@ workflow{
     
     if (params.no_intervals && step != 'annotate') bedIntervals = Channel.from(file("no_intervals.bed"))
     FastQCFQ(ch_input_sample)
-    MapReads(ch_input_sample, 
+
+    PartitionFastQ(ch_input_sample)
+
+    input_pair_reads = Channel.empty()
+                            .mix(PartitionFastQ.out)
+                            .flatMap{            
+                                idPatient, idSample, idRun, reads_1, reads_2 ->
+                                myList= []
+                                reads_1.each { read_1 -> 
+                                                split_index = read_1.fileName.toString().minus("r1_split_").minus(".fastq.gz")
+                                                parent = read_1.parent
+                                                read_2_fn = read_1.fileName.toString().replace("r1_split_", "r2_split_")
+                                                read_2 = "${parent}/${read_2_fn}"
+                                                new_id_run = "${idRun}_${split_index}"
+                                                myList.add([idPatient, idSample, new_id_run, read_1, file(read_2)])
+                                            }
+                                myList     
+                            }
+   
+    if (! params.split_fastq){
+         input_pair_reads = ch_input_sample
+    }
+    
+                    //    .ifEmpty {ch_input_sample}
+                       
+
+    input_pair_reads
+    .dump(tag: "Input Pair Reads: ")
+
+    // input_pair_reads = Channel.empty()
+    MapReads(input_pair_reads, 
             ch_bwa_index, 
             ch_fasta, 
             ch_fasta_fai)
@@ -691,10 +721,10 @@ def helpMessage() {
                                     and for pipline validation (if you have added GIAB samples):
                                     hap_py
                                     Default: None
-        --skip_qc                   Specify which QC tools to skip when running Sarek
+        --skip_qc                   Specify which QC tools to skip when running the pipeline
                                     Available: all, bamQC, BCFtools, FastQC, MultiQC, samtools, vcftools, versions
                                     Default: None
-        --annotate_tools             Specify from which tools Sarek will look for VCF files to annotate, only for step annotate
+        --annotate_tools             Specify from which tools the pipeline will look for VCF files to annotate, only for step annotate
                                     Available: HaplotypeCaller, Manta, Mutect2, Strelka, TIDDIT
                                     Default: None
                                     Adds the following tools for --tools: DNAseq, DNAscope and TNscope
@@ -1072,6 +1102,35 @@ process CreateIntervalBeds {
 }
 
 
+process PartitionFastQ {
+    label 'PartitionFastQ'
+    label 'cpus_32'
+
+    tag {idPatient + "-" + idRun}
+
+    // publishDir "${params.outdir}/Reports/${idSample}/FastQC/${idSample}_${idRun}", 
+    // mode: params.publish_dir_mode
+
+    input:
+        tuple idPatient, idSample, idRun, file("${idSample}_${idRun}_R1.fastq.gz"), 
+        file("${idSample}_${idRun}_R2.fastq.gz")
+
+    output:
+        tuple idPatient, idSample, idRun, file("r1_split_*"), file("r2_split_*") 
+        // val (tuple_list)
+
+    when: params.split_fastq
+    
+    script:
+    """
+    partition.sh in=${idSample}_${idRun}_R1.fastq.gz \
+                 in2=${idSample}_${idRun}_R2.fastq.gz  \
+                 out=r1_split_%.fastq.gz \
+                 out2=r2_split_%.fastq.gz \
+                 ways=${params.split_fastq}
+    """
+}
+
 process FastQCFQ {
     label 'FastQC'
     label 'cpus_2'
@@ -1141,7 +1200,7 @@ process MapReads {
 
 // STEP 1.5: MERGING BAM FROM MULTIPLE LANES
 process MergeBamMapped {
-    label 'cpus_8'
+    label 'cpus_16'
 
     tag {idPatient + "-" + idSample}
 
@@ -2462,7 +2521,7 @@ def printSummary(){
     if (params.vep_cache)             summary['vep_cache']             = params.vep_cache
     if (params.cadd_InDels)            summary['cadd_InDels']          = params.cadd_InDels
     if (params.cadd_WG_SNVs)            summary['cadd_WG_SNVs']          = params.cadd_WG_SNVs
-    if (params.giab_highconf)            summary['GIAB Truth Set']          = params.giab_highconf
+    if (params.giab_highconf_vcf)            summary['GIAB Truth Set']          = params.giab_highconf_vcf
     if (params.chco_highqual_snps)     summary['Children Colorado hig quality SNPs'] = params.chco_highqual_snps
     if (params.cadd_WG_SNVs_tbi)            summary['cadd_WG_SNVs_tbi']          = params.cadd_WG_SNVs_tbi
     
