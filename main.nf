@@ -389,10 +389,11 @@ workflow{
     // for per sample calls, just convert the gvcf to vcf for onward concatenatoin
     GvcfToVcf(HaplotypeCaller.out.gvcf_HaplotypeCaller)
     vcf_HaplotypeCaller = GvcfToVcf.out.vcf_HaplotypeCaller.groupTuple(by:[0, 1, 2])
-
-    // gvcf_HaplotypeCaller = HaplotypeCaller.out.gvcf_HaplotypeCaller.groupTuple(by:[0, 1, 2])
-    // if (params.no_gvcf) gvcf_HaplotypeCaller.close()
-    // else gvcf_HaplotypeCaller = gvcf_HaplotypeCaller.dump(tag:'GVCF HaplotypeCaller')
+    
+    // per interval gvcf from HaplotypeCaller for concatenate_vcf to generate per sample gvcf
+    gvcf_HaplotypeCaller = HaplotypeCaller.out.gvcf_HaplotypeCaller.groupTuple(by:[0, 1, 2])
+    if (params.no_gvcf) gvcf_HaplotypeCaller.close()
+    else gvcf_HaplotypeCaller = gvcf_HaplotypeCaller.dump(tag:'GVCF HaplotypeCaller')
 
     // gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs.groupTuple(by:[2])
     // gvcf_GenotypeGVCFs.dump(tag:'GVCF for GenotypeGVCFs')
@@ -466,9 +467,9 @@ workflow{
     //     ch_fasta_fai
     // )
     // vcf_ConcatenateVCFs = GenotypeGVCFs.out.vcf_GenotypeGVCFs.groupTuple(by:[0, 1, 2])
-    // if (!params.noGVCF){ // if user specified, noGVCF, skip saving the GVCFs from HaplotypeCaller
-    //     vcf_ConcatenateVCFs = vcf_ConcatenateVCFs.mix(gvcf_HaplotypeCaller)
-    // }
+    if (!params.no_gvcf){ // if user specified, noGVCF, skip saving the GVCFs from HaplotypeCaller
+        vcf_ConcatenateVCFs = vcf_ConcatenateVCFs.mix(gvcf_HaplotypeCaller)
+    }
     
     ConcatVCF(vcf_ConcatenateVCFs,
         ch_fasta_fai,
@@ -1260,8 +1261,8 @@ process Sambamba_MD {
 }
 
 process MarkDuplicates {
-    label 'cpus_32'
-    // label 'memory_max'
+    label 'cpus_max'
+    label 'memory_max'
     // cache false
     tag {idPatient + "-" + idSample}
 
@@ -1602,8 +1603,8 @@ process HaplotypeCaller {
         file(fastaFai)
 
     output:
-        // tuple val("HaplotypeCallerGVCF"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_HaplotypeCaller
-        tuple idPatient, idSample, file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_HaplotypeCaller
+        tuple val("HaplotypeCallerGVCF"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_HaplotypeCaller
+        // tuple idPatient, idSample, file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_HaplotypeCaller
         tuple idPatient, idSample, file(intervalBed), file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_GenotypeGVCFs
         // tuple val("${intervalBed.baseName}"), idPatient, idSample, file(intervalBed), file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_GenotypeGVCFs
         
@@ -1633,7 +1634,7 @@ process GvcfToVcf{
     // tag {idSample} 
     // publishDir "${params.outdir}/VariantCalling/${idSample}/HaplotypeCaller", mode: params.publish_dir_mode
     input:
-        tuple idPatient, idSample, file(gvcf)
+        tuple val(variantCaller), idPatient, idSample, file(gvcf)
 
     output:
         // tuple val('HaplotypeCaller_Individually_Genotyped'), idPatient, idSample, file("${gvcf.simpleName}.vcf"), emit: vcf_HaplotypeCaller
@@ -2480,7 +2481,7 @@ def printSummary(){
     if (params.skip_qc)              summary['QC tools skip']     = skipQC.join(', ')
 
     if (params.no_intervals && step != 'annotate') summary['Intervals']         = 'Do not use'
-    if ('haplotypecaller' in tools)                summary['GVCF']              = params.noGVCF ? 'No' : 'Yes'
+    if ('haplotypecaller' in tools)                summary['GVCF']              = params.no_gvcf ? 'No' : 'Yes'
     // if ('strelka' in tools && 'manta' in tools )   summary['Strelka BP']        = params.noStrelkaBP ? 'No' : 'Yes'
     if (params.sequencing_center)                  summary['Sequenced by']      = params.sequencing_center
     if (params.pon && 'mutect2' in tools)          summary['Panel of normals']  = params.pon
@@ -2539,7 +2540,7 @@ def printSummary(){
         summary['MultiQC maxsize']       = params.maxMultiqcEmailFileSize
     }
     // params.properties.each { log.info "${it.key} -> ${it.value}" }
-    log.info params.dump()
+    // log.info params.dump()
     log.info summary.collect { k, v -> "${k.padRight(18)}: $v" }.join("\n")
     if (params.monochrome_logs) log.info "----------------------------------------------------"
     else log.info "\033[2m----------------------------------------------------\033[0m"
@@ -2735,6 +2736,15 @@ def extractFastq(tsvFile) {
     Channel.from(tsvFile)
         .splitCsv(sep: '\t')
         .map { row ->
+            log.info("Parsing Row: ${row}")
+            log.info("row[0]:${row[0]}")
+            log.info("row[1]:${row[1]}")
+            log.info("row[2]:${row[2]}")
+            log.info("row[3]:${row[3]}")
+            log.info("row[4]:${row[4]}")
+            log.info("row[5]:${row[5]}")
+            log.info("row[6]:${row[6]}")
+
             def idPatient  = row[0]
             def gender     = row[1]
             def status     = returnStatus(row[2].toInteger())
