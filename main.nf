@@ -353,20 +353,25 @@ workflow{
        ch_merged_bams = ch_input_sample	 
     }
 
-    DV_MakeExamples(IndexBamFile.out,
-                    ch_fasta,
-                    ch_fasta_fai,
-                    ch_fasta_gz,
-                    ch_fasta_gz_fai,
-                    ch_fasta_gzi,
-                    ch_target_bed)
+   
+
+    MarkDuplicates(ch_merged_bams)
+
+    // Use Duplicated Marked Bams for DeepVariant
+    DV_MakeExamples(MarkDuplicates.out.marked_bams,
+                ch_fasta,
+                ch_fasta_fai,
+                ch_fasta_gz,
+                ch_fasta_gz_fai,
+                ch_fasta_gzi,
+                ch_target_bed)
+    
     DV_CallVariants(DV_MakeExamples.out.shared_examples)
     DV_PostprocessVariants(DV_CallVariants.out.variant_tf_records,
                             ch_fasta_gz,
                             ch_fasta_gz_fai,
                             ch_fasta_gzi)
 
-    MarkDuplicates(ch_merged_bams)
 
     md_bams = MarkDuplicates.out.marked_bams.combine(ch_bed_intervals)
     // md_bams = Sambamba_MD.out.combine(ch_bed_intervals)
@@ -2118,6 +2123,64 @@ process DV_PostprocessVariants{
                                Copy Number callers
 ================================================================================
 */
+
+
+// STEP MPILEUP.1
+
+process Mpileup {
+    label 'memory_singleCPU_2_task'
+
+    tag {idSample + "-" + intervalBed.baseName}
+
+    input:
+        set idPatient, idSample, file(bam), file(bai), file(intervalBed) from bamMpileup
+        file(fasta) from ch_fasta
+        file(fastaFai) from ch_fastaFai
+
+    output:
+        set idPatient, idSample, file("${prefix}${idSample}.pileup.gz") into mpileupMerge
+
+    when: 'controlfreec' in tools || 'mpileup' in tools
+
+    script:
+    prefix = params.no_intervals ? "" : "${intervalBed.baseName}_"
+    intervalsOptions = params.no_intervals ? "" : "-l ${intervalBed}"
+    """
+    samtools mpileup \
+        -f ${fasta} ${bam} \
+        ${intervalsOptions} \
+    | bgzip --threads ${task.cpus} -c > ${prefix}${idSample}.pileup.gz
+    """
+}
+
+
+// STEP MPILEUP.2 - MERGE
+
+process MergeMpileup {
+    tag {idSample}
+
+    publishDir params.outdir, mode: params.publishDirMode, saveAs: { it == "${idSample}.pileup.gz" ? "VariantCalling/${idSample}/mpileup/${it}" : '' }
+
+    input:
+        set idPatient, idSample, file(mpileup) from mpileupMerge
+
+    output:
+        set idPatient, idSample, file("${idSample}.pileup.gz") into mpileupOut
+
+    when: !(params.no_intervals) && 'controlfreec' in tools || 'mpileup' in tools
+
+    script:
+    """
+    for i in `ls -1v *.pileup.gz`;
+        do zcat \$i >> ${idSample}.pileup
+    done
+
+    bgzip --threads ${task.cpus} -c ${idSample}.pileup > ${idSample}.pileup.gz
+
+    rm ${idSample}.pileup
+    """
+}
+
 
 // STEP STRELKA.1 - SINGLE MODE
 
