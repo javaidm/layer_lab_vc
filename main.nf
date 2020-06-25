@@ -449,8 +449,21 @@ workflow{
         ch_dict
     )
 
+    // bam_HaplotypeCaller => [idPatiend, idSample, recalibrated bam, bam.bai, single interval to operate on]
+    // we'll reuse this channel for the mpileup as well
     bam_HaplotypeCaller = bam_recal.combine(ch_bed_intervals)
     
+    Mpileup(bam_HaplotypeCaller,
+            ch_fasta,
+            ch_fasta_fai    
+    )
+    
+    MergeMpileup(
+        Mpileup.out.groupTuple(by:[0, 1]) 
+    )
+
+
+
     HaplotypeCaller(bam_HaplotypeCaller,
         ch_dbsnp,
         ch_dbsnp_index,
@@ -2129,16 +2142,17 @@ process DV_PostprocessVariants{
 
 process Mpileup {
     label 'memory_singleCPU_2_task'
-
     tag {idSample + "-" + intervalBed.baseName}
+    
+    publishDir params.outdir, mode: params.publish_dir_mode, saveAs: { it == "${idSample}.pileup.gz" ? "VariantCalling/${idSample}/mpileup/${it}" : '' }
 
     input:
-        set idPatient, idSample, file(bam), file(bai), file(intervalBed) from bamMpileup
-        file(fasta) from ch_fasta
-        file(fastaFai) from ch_fastaFai
+        tuple idPatient, idSample, file(bam), file(bai), file(intervalBed)
+        file(fasta)
+        file(fastaFai)
 
     output:
-        set idPatient, idSample, file("${prefix}${idSample}.pileup.gz") into mpileupMerge
+        tuple idPatient, idSample, file("${prefix}${idSample}.pileup.gz")
 
     when: 'controlfreec' in tools || 'mpileup' in tools
 
@@ -2159,13 +2173,13 @@ process Mpileup {
 process MergeMpileup {
     tag {idSample}
 
-    publishDir params.outdir, mode: params.publishDirMode, saveAs: { it == "${idSample}.pileup.gz" ? "VariantCalling/${idSample}/mpileup/${it}" : '' }
+    publishDir params.outdir, mode: params.publish_dir_mode, saveAs: { it == "${idSample}.pileup.gz" ? "VariantCalling/${idSample}/mpileup/${it}" : '' }
 
     input:
-        set idPatient, idSample, file(mpileup) from mpileupMerge
+        tuple idPatient, idSample, file(mpileup)
 
     output:
-        set idPatient, idSample, file("${idSample}.pileup.gz") into mpileupOut
+        tuple idPatient, idSample, file("${idSample}.pileup.gz")
 
     when: !(params.no_intervals) && 'controlfreec' in tools || 'mpileup' in tools
 
