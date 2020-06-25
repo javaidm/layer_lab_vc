@@ -51,18 +51,23 @@ if (tsvPath) {
     tsvFile = file(tsvPath)
     switch (step) {
         case 'mapping': ch_input_sample = extractFastq(tsvFile); break
+        case 'markdups': ch_input_sample = extractMarkDups(tsvFile); break
         case 'recalibrate': ch_input_sample = extractRecal(tsvFile); break
         case 'variantcalling': ch_input_sample = extractBam(tsvFile); break
         case 'annotate': break
         default: exit 1, "Unknown step ${step}"
     }
 }
+// ch_input_sample
+//     .dump(tag: 'ch_input_sample just created!')
 // inputSample
 // .map{[it[0],it[3],it[4],it[5],it[6]]}
 // .set{ch_input_5_col}
 
 (genderMap, statusMap, ch_input_sample) = extractInfos(ch_input_sample)
 
+// ch_input_sample
+//     .dump(tag: 'ch_input_sample after extracting info!')
 /*
 ================================================================================
                                CHECKING REFERENCES
@@ -102,13 +107,18 @@ params.ac_loci_gc = params.genome && 'ascat' in tools ? params.genomes[params.ge
 params.bwa_index = params.genome && params.fasta && 'mapping' in step ? params.genomes[params.genome].bwa_index ?: null : null
 params.chr_dir = params.genome && 'controlfreec' in tools ? params.genomes[params.genome].chr_dir ?: null : null
 params.chr_length = params.genome && 'controlfreec' in tools ? params.genomes[params.genome].chr_length ?: null : null
-params.dbsnp = params.genome && ('mapping' in step || 'controlfreec' in tools || 'haplotypecaller' in tools || 'mutect2' in tools) ? params.genomes[params.genome].dbsnp ?: null : null
+params.dbsnp = params.genome && \
+                ('mapping' in step || 'markdups' in step || 'controlfreec' in tools || 'haplotypecaller' in tools || 'mutect2' in tools) \
+                ? params.genomes[params.genome].dbsnp ?: null : null
+
 params.dbsnp_index = params.genome && params.dbsnp ? params.genomes[params.genome].dbsnp_index ?: null : null
 params.dict = params.genome && params.fasta ? params.genomes[params.genome].dict ?: null : null
 params.germline_resource = params.genome && 'mutect2' in tools ? params.genomes[params.genome].germline_resource ?: null : null
 params.germline_resource_index = params.genome && params.germline_resource ? params.genomes[params.genome].germline_resource_index ?: null : null
 params.intervals = params.genome && !('annotate' in step) ? params.genomes[params.genome].intervals ?: null : null
-params.known_indels = params.genome && 'mapping' in step ? params.genomes[params.genome].known_indels ?: null : null
+params.known_indels = params.genome && ( 'mapping' in step || 'markdups' in step ) \
+                            ? params.genomes[params.genome].known_indels ?: null : null
+
 params.known_indels_index = params.genome && params.known_indels ? params.genomes[params.genome].known_indels_index ?: null : null
 
 // Initialize channels based on params
@@ -136,10 +146,10 @@ ch_target_bed = params.target_bed ? Channel.value(file(params.target_bed)) : "nu
 ch_bait_bed = params.bait_bed ? Channel.value(file(params.bait_bed)) : "null"
 // knownIndels is currently a list of file for smallGRCh37, so transform it in a channel
 li_known_indels = []
-if (params.known_indels && ('mapping' in step)) params.known_indels.each { li_known_indels.add(file(it)) }
+if (params.known_indels && ('mapping' in step || 'markdups' in step)) params.known_indels.each { li_known_indels.add(file(it)) }
 
 li_known_indels_index = []
-if (params.known_indels_index && ('mapping' in step)) params.known_indels_index.each { li_known_indels_index.add(file(it)) }
+if (params.known_indels_index && ('mapping' in step || 'markdups' in step)) params.known_indels_index.each { li_known_indels_index.add(file(it)) }
 // ch_known_indels = Channel.empty()
 // ch_known_indels_index = Channel.empty()
 ch_known_indels = params.known_indels && params.genome == 'smallGRCh37' \
@@ -252,36 +262,44 @@ workflow{
                             CreateIntervalBeds.out.flatten() )
     
     if (params.no_intervals && step != 'annotate') bedIntervals = Channel.from(file("no_intervals.bed"))
-    FastQCFQ(ch_input_sample)
-
-    PartitionFastQ(ch_input_sample)
-
-    input_pair_reads = Channel.empty()
-                            .mix(PartitionFastQ.out)
-                            .flatMap{            
-                                idPatient, idSample, idRun, reads_1, reads_2 ->
-                                myList= []
-                                reads_1.each { read_1 -> 
-                                                split_index = read_1.fileName.toString().minus("r1_split_").minus(".fastq.gz")
-                                                parent = read_1.parent
-                                                read_2_fn = read_1.fileName.toString().replace("r1_split_", "r2_split_")
-                                                read_2 = "${parent}/${read_2_fn}"
-                                                new_id_run = "${idRun}_${split_index}"
-                                                myList.add([idPatient, idSample, new_id_run, read_1, file(read_2)])
-                                            }
-                                myList     
-                            }
-   
-    if (! params.split_fastq){
-         input_pair_reads = ch_input_sample
-    }
     
-                    //    .ifEmpty {ch_input_sample}
-                       
 
-    input_pair_reads
-    .dump(tag: "Input Pair Reads: ")
-
+    // if (step in ['recalibrate', 'variantcalling', 'annotate']) {
+    //     inputBam.close()
+    //     inputPairReads.close()
+    // } else{
+        
+    // }
+    
+    input_pair_reads = Channel.empty()
+    // Close the input_pair_read if the starting step is not mapping
+    if (step == 'mapping'){           
+        if (params.split_fastq){
+            PartitionFastQ(ch_input_sample)
+            input_pair_reads = input_pair_reads.mix(PartitionFastQ.out)
+            .flatMap{            
+                idPatient, idSample, idRun, reads_1, reads_2 ->
+                myList= []
+                reads_1.each { read_1 -> 
+                                split_index = read_1.fileName.toString().minus("r1_split_").minus(".fastq.gz")
+                                parent = read_1.parent
+                                read_2_fn = read_1.fileName.toString().replace("r1_split_", "r2_split_")
+                                read_2 = "${parent}/${read_2_fn}"
+                                new_id_run = "${idRun}_${split_index}"
+                                myList.add([idPatient, idSample, new_id_run, read_1, file(read_2)])
+                            }
+                myList     
+            }
+        }else{
+            input_pair_reads = ch_input_sample
+        }
+    }
+    FastQCFQ(input_pair_reads)     
+    
+    // input_pair_reads
+    // .dump(tag: "Input Pair Reads: ")
+    
+    
     // input_pair_reads = Channel.empty()
     MapReads(input_pair_reads, 
             ch_bwa_index, 
@@ -302,18 +320,46 @@ workflow{
         [idPatient, idSample, bam]
     }
     MergeBamMapped(ch_multiple_bams)
+    
+    ch_merged_bams = Channel.empty()
     ch_merged_bams = MergeBamMapped.out.mix(ch_single_bams)
-   
+    
+    // Creating a TSV file to restart from this step
+    ch_merged_bams
+    .map { idPatient, idSample, bamFile ->
+        status = statusMap[idPatient, idSample]
+        gender = genderMap[idPatient]
+        bam = "${params.outdir}/Bams/${idSample}/${idSample}.bam"
+        // bai = "${params.outdir}/Bams/${idSample}/${idSample}.bai"
+        "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\n"
+    }.collectFile(
+        name: 'mapped_bam.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
+    )
+    
+    // exit 1, 'leaving early!'
     IndexBamFile(ch_merged_bams)
-   
+    // // Create TSV files to restart from this step
+    // IndexBamFile.out.map { idPatient, idSample ->
+    //     status = statusMap[idPatient, idSample]
+    //     gender = genderMap[idPatient]
+    //     bam = "${params.outdir}/Bams/${idSample}/${idSample}.bam"
+    //     bai = "${params.outdir}/Bams/${idSample}/${idSample}.bai"
+    //     "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"
+    // }.collectFile(
+    //     name: 'mapped_bam.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
+    // )
+    
+    if (step == 'markdups'){
+       ch_merged_bams = ch_input_sample	 
+    }
 
     DV_MakeExamples(IndexBamFile.out,
-                  ch_fasta,
-                ch_fasta_fai,
-                ch_fasta_gz,
-                ch_fasta_gz_fai,
-                ch_fasta_gzi,
-                ch_target_bed)
+                    ch_fasta,
+                    ch_fasta_fai,
+                    ch_fasta_gz,
+                    ch_fasta_gz_fai,
+                    ch_fasta_gzi,
+                    ch_target_bed)
     DV_CallVariants(DV_MakeExamples.out.shared_examples)
     DV_PostprocessVariants(DV_CallVariants.out.variant_tf_records,
                             ch_fasta_gz,
@@ -321,7 +367,7 @@ workflow{
                             ch_fasta_gzi)
 
     MarkDuplicates(ch_merged_bams)
-    // Sambamba_MD(ch_merged_bams)
+
     md_bams = MarkDuplicates.out.marked_bams.combine(ch_bed_intervals)
     // md_bams = Sambamba_MD.out.combine(ch_bed_intervals)
 
@@ -358,7 +404,28 @@ workflow{
     IndexBamRecal(bam_merge_bam_recal)
     bam_recal = MergeBamRecal.out.bam_recal.mix(IndexBamRecal.out.bam_recal)
     bam_recal_qc = MergeBamRecal.out.bam_recal_qc.mix(IndexBamRecal.out.bam_recal_qc)
-    
+    // Creating a TSV file to restart from this step
+    bam_recal.map { idPatient, idSample, bamFile, baiFile ->
+        gender = genderMap[idPatient]
+        status = statusMap[idPatient, idSample]
+        bam = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam"
+        bai = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam.bai"
+        "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"
+    }.collectFile(
+        name: 'recalibrated.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
+    )
+
+    bam_recal
+        .collectFile(storeDir: "${params.outdir}/Preprocessing/TSV") {
+            idPatient, idSample, bamFile, baiFile ->
+            status = statusMap[idPatient, idSample]
+            gender = genderMap[idPatient]
+            bam = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam"
+            bai = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam.bai"
+            ["recalibrated_${idSample}.tsv", "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"]
+    }
+
+
     SamtoolsStats(bam_recal_qc)
 
     CollectAlignmentSummaryMetrics(
@@ -386,25 +453,24 @@ workflow{
         ch_fasta,
         ch_fasta_fai
     )
+
+    // HaplotypeCaller_BP_RESOLUTION(bam_HaplotypeCaller,
+    //     ch_dbsnp,
+    //     ch_dbsnp_index,
+    //     ch_dict,
+    //     ch_fasta,
+    //     ch_fasta_fai
+    // )
+
     // for per sample calls, just convert the gvcf to vcf for onward concatenatoin
     GvcfToVcf(HaplotypeCaller.out.gvcf_HaplotypeCaller)
     vcf_HaplotypeCaller = GvcfToVcf.out.vcf_HaplotypeCaller.groupTuple(by:[0, 1, 2])
     
     // per interval gvcf from HaplotypeCaller for concatenate_vcf to generate per sample gvcf
     gvcf_HaplotypeCaller = HaplotypeCaller.out.gvcf_HaplotypeCaller.groupTuple(by:[0, 1, 2])
-    if (params.no_gvcf) gvcf_HaplotypeCaller.close()
-    else gvcf_HaplotypeCaller = gvcf_HaplotypeCaller.dump(tag:'GVCF HaplotypeCaller')
-
-    // gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs.groupTuple(by:[2])
-    // gvcf_GenotypeGVCFs.dump(tag:'GVCF for GenotypeGVCFs')
-    // mapped_gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs
-    //                             .map{idPatient, idSample, intervalBed, gvcf ->
-    //                             [intervalBed.baseName, intervalBed, idPatient, idSample, gvcf]}
-    //                             .groupTuple(by:[0])
-    //                             .map{interval_name, liIntervalBed, liIdPatient, liIdSample, liGvcf -> 
-    //                                 [interval_name, liIntervalBed.first(), liIdPatient, liIdSample, liGvcf]
-    //                                 }
-    //                             .dump(tag: 'Collected HaplotypeCaller output')
+    
+    // per interval BP_RESOLUTION gvcf from HaplotypeCaller for concatenate_vcf to generate per sample gvcf
+    // bp_resolution_gvcf = HaplotypeCaller_BP_RESOLUTION.out.bp_resolution_gvcf.groupTuple(by:[0, 1, 2])
     
     mapped_gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs
                                 .map{idPatient, idSample, intervalBed, gvcf ->
@@ -467,15 +533,17 @@ workflow{
     //     ch_fasta_fai
     // )
     // vcf_ConcatenateVCFs = GenotypeGVCFs.out.vcf_GenotypeGVCFs.groupTuple(by:[0, 1, 2])
-    if (!params.no_gvcf){ // if user specified, noGVCF, skip saving the GVCFs from HaplotypeCaller
+    if (!params.no_gvcf){ // if user specified, noGVCF, skip saving the GVCFs from HaplotypeCaller, and HC BP_RESOLUTION
         vcf_ConcatenateVCFs = vcf_ConcatenateVCFs.mix(gvcf_HaplotypeCaller)
+        // vcf_ConcatenateVCFs = vcf_ConcatenateVCFs.mix(bp_resolution_gvcf)
     }
-    
+    // vcf_ConcatenateVCFs.dump('concat_vcf: ')
+
     ConcatVCF(vcf_ConcatenateVCFs,
         ch_fasta_fai,
         ch_target_bed)
     // Create a channel to hold GIAB samples for validation using hap.py
-    ch_vcfs_hap_py = Channel.empty()
+    vcfs_hap_py = Channel.empty()
                     .mix(
                           DV_PostprocessVariants.out.vcf,
                         // only keep individually genotyped vcfs
@@ -487,10 +555,21 @@ workflow{
                         "${it[2]}".contains('GIAB')
                     }
                     .dump(tag: "Channel for Hap_py")
+    // hap_py_against_giab = truth_set_vcf
+    //                         .map{ 
+    //                                 caller, idPatient, idSample, vcf, tbi ->
+    //                                 ['GIAB', caller, idPatient, idSample, vcf, tbi ]
+    //                             }
+    //                         .combine(ch_giab_highconf_vcf)
+    //                         .combine(ch_giab_highconf_tbi)
+    hap_py_against_giab = Channel.from('GIAB')
+                            .combine(vcfs_hap_py)
+                            .combine(ch_giab_highconf_vcf)
+                            .combine(ch_giab_highconf_tbi)
     
-    HapPy(ch_vcfs_hap_py,
-          ch_giab_highconf_vcf,
-          ch_giab_highconf_tbi,
+    hap_py_against_giab.dump(tag: 'hap_py_against_giab: ')
+
+    HapPy(hap_py_against_giab,
           ch_giab_highconf_regions,
           ch_target_bed,
           ch_bait_bed,
@@ -619,7 +698,7 @@ workflow{
         Channel.value(""),
         GetSoftwareVersions.out,
         BcftoolsStats.out,
-        FastQCFQ.out,
+        FastQCFQ.out.collect().ifEmpty([]),
         MarkDuplicates.out[1],
         SamtoolsStats.out,
         SnpEff.out.snpEff_report,
@@ -1104,7 +1183,7 @@ process CreateIntervalBeds {
 
 
 process PartitionFastQ {
-    label 'PartitionFastQ'
+    // label 'PartitionFastQ'
     label 'cpus_32'
 
     tag {idPatient + "-" + idRun}
@@ -1120,15 +1199,16 @@ process PartitionFastQ {
         tuple idPatient, idSample, idRun, file("r1_split_*"), file("r2_split_*") 
         // val (tuple_list)
 
-    when: params.split_fastq
+    when: params.split_fastq && step == 'mapping'
     
     script:
     """
-    partition.sh in=${idSample}_${idRun}_R1.fastq.gz \
-                 in2=${idSample}_${idRun}_R2.fastq.gz  \
-                 out=r1_split_%.fastq.gz \
-                 out2=r2_split_%.fastq.gz \
-                 ways=${params.split_fastq}
+    partition.sh \
+                in=${idSample}_${idRun}_R1.fastq.gz \
+                in2=${idSample}_${idRun}_R2.fastq.gz  \
+                out=r1_split_%.fastq.gz \
+                out2=r2_split_%.fastq.gz \
+                ways=${params.split_fastq}
     """
 }
 
@@ -1148,7 +1228,7 @@ process FastQCFQ {
     output:
         file("*.{html,zip}")
 
-    when: !('fastqc' in skipQC)
+    when: !('fastqc' in skipQC) && (step == 'mapping')
     
     script:
     """
@@ -1163,7 +1243,7 @@ process MapReads {
     label 'cpus_max'
 
     tag {idPatient + "-" + idRun}
-    publishDir "${params.outdir}/Bams/${idSample}/${idSample}_${idRun}", mode: params.publish_dir_mode
+    // publishDir "${params.outdir}/Bams/${idSample}/${idSample}_${idRun}", mode: params.publish_dir_mode
 
     input:
         tuple idPatient, idSample, idRun, file(inputFile1), file(inputFile2)
@@ -1219,7 +1299,7 @@ process MergeBamMapped {
 
 process IndexBamFile {
     label 'cpus_16'
-
+    publishDir "${params.outdir}/Bams/${idSample}/", mode: params.publish_dir_mode
     tag {idPatient + "-" + idSample}
 
     input:
@@ -1262,7 +1342,7 @@ process Sambamba_MD {
 
 process MarkDuplicates {
     label 'cpus_max'
-    label 'memory_max'
+    // label 'memory_max'
     // cache false
     tag {idPatient + "-" + idSample}
 
@@ -1274,6 +1354,7 @@ process MarkDuplicates {
         }
 
     input:
+        // tuple idPatient, idSample, file("${idSample}.bam"), file("${idSample}.bai")
         tuple idPatient, idSample, file("${idSample}.bam")
 
     output:
@@ -1284,7 +1365,8 @@ process MarkDuplicates {
     when: params.known_indels
 
     script:
-    markdup_java_options = task.memory.toGiga() > 8 ? params.markdup_java_options : "\"-Xms" +  (task.memory.toGiga() / 2).trunc() + "g -Xmx" + (task.memory.toGiga() - 1) + "g\""
+    // markdup_java_options = task.memory.toGiga() > 8 ? params.markdup_java_options : "\"-Xms" +  (task.memory.toGiga() / 2).trunc() + "g -Xmx" + (task.memory.toGiga() - 1) + "g\""
+    markdup_java_options =  "\"-Xms" +  (task.memory.toGiga() / 2).trunc() + "g -Xmx" + (task.memory.toGiga() - 1) + "g\""
     // markdup_java_options =  "\"-Xms" + 16 + "g -Xmx" + 32 + "g\""
     // markdup_java_options =  "\"-Xms16g -Xmx32g\""
     """
@@ -1624,6 +1706,43 @@ process HaplotypeCaller {
     """
 }
 
+// process HaplotypeCaller_BP_RESOLUTION {
+//     label 'memory_singleCPU_task_sq'
+//     label 'cpus_8'
+//     // label 'memory_max'
+//     // label 'cpus_max'
+
+//     tag {idSample + "-" + intervalBed.baseName}
+//     // tag {idSample} 
+//     // publishDir "${params.outdir}/VariantCalling/${idSample}/HaplotypeCaller", mode: params.publish_dir_mode
+//     input:
+//         tuple idPatient, idSample, file(bam), file(bai), file(intervalBed) 
+//         // tuple idPatient, idSample, file(bam), file(bai) 
+//         file(dbsnp)
+//         file(dbsnpIndex)
+//         file(dict)
+//         file(fasta)
+//         file(fastaFai)
+
+//     output:
+//         tuple val("HaplotypeCallerGVCF_BP_RESOLUTION"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: bp_resolution_gvcf
+
+//     when: 'haplotypecaller' in tools
+
+//     script:
+//     """
+//     gatk --java-options "-Xmx${task.memory.toGiga()}g -Xms6000m -XX:GCTimeLimit=50 -XX:GCHeapFreeLimit=10" \
+//         HaplotypeCaller \
+//         -R ${fasta} \
+//         -I ${bam} \
+//         -L ${intervalBed} \
+//         -D ${dbsnp} \
+//         -O ${intervalBed.baseName}_${idSample}.g.vcf \
+//         -ERC BP_RESOLUTION
+//     """
+// }
+
+
 process GvcfToVcf{
     label 'memory_singleCPU_task_sq'
     label 'cpus_2'
@@ -1786,6 +1905,8 @@ process ConcatVCF {
     script:
     if (variantCaller == 'HaplotypeCallerGVCF') 
       outputFile = "HaplotypeCaller_${idSample}.g.vcf"
+    else if (variantCaller == 'HaplotypeCallerGVCF_BP_RESOLUTION') 
+      outputFile = "HaplotypeCaller_BP_RESOLUTION_${idSample}.g.vcf"
     else if (variantCaller == "Mutect2") 
       outputFile = "unfiltered_${variantCaller}_${idSample}.vcf"
     else 
@@ -1807,12 +1928,12 @@ process HapPy {
 
     tag {idSample}
 
-    publishDir "${params.outdir}/Validation/${idSample}/${variantCaller}", mode: params.publish_dir_mode
+    publishDir "${params.outdir}/Validation/Against_${truth_set}/${idSample}/${variantCaller}", mode: params.publish_dir_mode
 
     input:
-        tuple variantCaller, idPatient, idSample, file(vcf), file(tbi)
-        file(giab_highconf_vcf)
-        file(giab_highconf_tbi)
+        tuple truth_set, variantCaller, idPatient, idSample, file(vcf), file(tbi), file (truth_set_vcf), file (truth_set_tbi) 
+        // file(giab_highconf_vcf)
+        // file(giab_highconf_tbi)
         file(giab_highqual_regions)
         file(target_bed)
         file(bait_bed)
@@ -1834,12 +1955,12 @@ process HapPy {
     export HGREF=$fasta
     mkdir scratch
     hap.py  \
-        $giab_highconf_vcf \
-        $vcf \
-        -f $giab_highqual_regions \
+        ${truth_set_vcf} \
+        ${vcf} \
+        -f ${giab_highqual_regions} \
         --scratch-prefix scratch \
         --engine vcfeval \
-        -T $target_bed \
+        -T ${target_bed} \
         --threads ${task.cpus} \
         -o hap_py.${vcf.baseName}
     """
@@ -1908,6 +2029,7 @@ process DV_MakeExamples{
     when: 'deepvariant' in tools
     script:
     // sharded_folder = "${bam}.tfrecord@${task.cpus}.gz"
+    use_regions = params.target_bed ? "--regions ${target_bed}" :  ''
     """
     mkdir logs
     mkdir ${bam.baseName}_shardedExamples
@@ -1916,7 +2038,7 @@ process DV_MakeExamples{
     --sample ${bam} \
     --ref ${fastagz} \
     --reads ${bam} \
-    --regions ${target_bed} \
+    ${use_regions} \
     --logdir logs \
     --examples ${bam.baseName}_shardedExamples
 
@@ -2631,6 +2753,7 @@ def defineStepList() {
     return [
         'annotate',
         'mapping',
+        'markdups',
         'recalibrate',
         'variantcalling'
     ]
@@ -2661,23 +2784,55 @@ def defineToolList() {
 
 // Channeling the TSV file containing BAM.
 // Format is: "subject gender status sample bam bai"
+// def extractBam(tsvFile) {
+//     Channel.from(tsvFile)
+//         .splitCsv(sep: '\t')
+//         .map { row ->
+//             checkNumberOfItem(row, 6)
+//             def idPatient = row[0]
+//             def gender    = row[1]
+//             def status    = returnStatus(row[2].toInteger())
+//             def idSample  = row[3]
+//             def bamFile   = returnFile(row[4])
+//             def baiFile   = returnFile(row[5])
+
+//             if (!hasExtension(bamFile, "bam")) exit 1, "File: ${bamFile} has the wrong extension. See --help for more information"
+//             if (!hasExtension(baiFile, "bai")) exit 1, "File: ${baiFile} has the wrong extension. See --help for more information"
+
+//             return [idPatient, gender, status, idSample, bamFile, baiFile]
+//         }
+// }
+
 def extractBam(tsvFile) {
-    Channel.from(tsvFile)
-        .splitCsv(sep: '\t')
-        .map { row ->
-            checkNumberOfItem(row, 6)
-            def idPatient = row[0]
-            def gender    = row[1]
-            def status    = returnStatus(row[2].toInteger())
-            def idSample  = row[3]
-            def bamFile   = returnFile(row[4])
-            def baiFile   = returnFile(row[5])
+    def infos = []
 
-            if (!hasExtension(bamFile, "bam")) exit 1, "File: ${bamFile} has the wrong extension. See --help for more information"
-            if (!hasExtension(baiFile, "bai")) exit 1, "File: ${baiFile} has the wrong extension. See --help for more information"
+    def allLines = tsvFile.readLines()
+    for (line in allLines){
+        info("Parsing Line: ${line}")
 
-            return [idPatient, gender, status, idSample, bamFile, baiFile]
-        }
+        def trimmed = line.trim()
+        def cols = trimmed.split()
+        checkNumberOfItem(cols, 6)
+
+        info("cols[0]:${cols[0]}")
+        info("cols[1]:${cols[1]}")
+        info("cols[2]:${cols[2]}")
+        info("cols[3]:${cols[3]}")
+        info("cols[4]:${cols[4]}")
+        info("cols[5]:${cols[5]}")
+
+        def idPatient  = cols[0]
+        def gender     = cols[1]
+        def status     = returnStatus(cols[2].toInteger())
+        def idSample   = cols[3]
+        def bamFile   = returnFile(cols[4])
+        def baiFile   = returnFile(cols[5])
+        if (!hasExtension(bamFile, "bam")) exit 1, "File: ${bamFile} has the wrong extension. See --help for more information"
+        if (!hasExtension(baiFile, "bai")) exit 1, "File: ${baiFile} has the wrong extension. See --help for more information"
+
+        infos.add([idPatient, gender, status, idSample, bamFile, baiFile])
+    }
+    return Channel.from(infos)
 }
 
 // Create a channel of germline FASTQs from a directory pattern: "my_samples/*/"
@@ -2729,62 +2884,115 @@ def extractInfos(channel) {
     [genderMap, statusMap, channel]
 }
 
-// Channeling the TSV file containing FASTQ or BAM
-// Format is: "subject gender status sample lane fastq1 fastq2"
-// or: "subject gender status sample lane bam"
-def extractFastq(tsvFile) {
-    Channel.from(tsvFile)
-        .splitCsv(sep: '\t')
-        .map { row ->
-            log.info("Parsing Row: ${row}")
-            log.info("row[0]:${row[0]}")
-            log.info("row[1]:${row[1]}")
-            log.info("row[2]:${row[2]}")
-            log.info("row[3]:${row[3]}")
-            log.info("row[4]:${row[4]}")
-            log.info("row[5]:${row[5]}")
-            log.info("row[6]:${row[6]}")
-
-            def idPatient  = row[0]
-            def gender     = row[1]
-            def status     = returnStatus(row[2].toInteger())
-            def idSample   = row[3]
-            def idRun      = row[4]
-            def file1      = returnFile(row[5])
-            def file2      = "null"
-            if (hasExtension(file1, "fastq.gz") || hasExtension(file1, "fq.gz")) {
-                checkNumberOfItem(row, 7)
-                file2 = returnFile(row[6])
-            if (!hasExtension(file2, "fastq.gz") && !hasExtension(file2, "fq.gz")) exit 1, "File: ${file2} has the wrong extension. See --help for more information"
-        }
-        else if (hasExtension(file1, "bam")) checkNumberOfItem(row, 6)
-        else "No recognisable extention for input file: ${file1}"
-
-        [idPatient, gender, status, idSample, idRun, file1, file2]
+def info(message){
+    // log.info(message)
+    if (params.debug){
+        log.info(message)
     }
 }
 
-// Channeling the TSV file containing Recalibration Tables.
-// Format is: "subject gender status sample bam bai recalTables"
+def extractFastq(tsvFile) {
+    def infos = []
+
+    def allLines = tsvFile.readLines()
+    for (line in allLines){
+        info("Parsing Line: ${line}")
+
+        def trimmed = line.trim()
+        def cols = trimmed.split()
+        checkNumberOfItem(cols, 7)
+        
+
+        info("cols[0]:${cols[0]}")
+        info("cols[1]:${cols[1]}")
+        info("cols[2]:${cols[2]}")
+        info("cols[3]:${cols[3]}")
+        info("cols[4]:${cols[4]}")
+        info("cols[5]:${cols[5]}")
+        info("cols[6]:${cols[6]}")
+
+        def idPatient  = cols[0]
+        def gender     = cols[1]
+        def status     = returnStatus(cols[2].toInteger())
+        def idSample   = cols[3]
+        def idRun      = cols[4]
+        def file1      = returnFile(cols[5])
+        def file2      = "null"
+        file2 = returnFile(cols[6])
+        if (!hasExtension(file2, "fastq.gz") && !hasExtension(file2, "fq.gz")) exit 1, "File: ${file2} has the wrong extension. See --help for more information"
+
+        infos.add([idPatient, gender, status, idSample, idRun, file1, file2])
+    }
+    return Channel.from(infos)
+}
+
+def extractMarkDups(tsvFile) {
+    def infos = []
+
+    def allLines = tsvFile.readLines()
+    for (line in allLines){
+        info("Parsing Line: ${line}")
+
+        def trimmed = line.trim()
+        def cols = trimmed.split()
+        checkNumberOfItem(cols, 6)
+
+        info("cols[0]:${cols[0]}")
+        info("cols[1]:${cols[1]}")
+        info("cols[2]:${cols[2]}")
+        info("cols[3]:${cols[3]}")
+        info("cols[4]:${cols[4]}")
+        info("cols[5]:${cols[5]}")
+
+        def idPatient  = cols[0]
+        def gender     = cols[1]
+        def status     = returnStatus(cols[2].toInteger())
+        def idSample   = cols[3]
+        def bamFile   = returnFile(cols[4])
+        if (!hasExtension(bamFile, "bam")) exit 1, "File: ${bamFile} has the wrong extension. See --help for more information"
+        def baiFile   = returnFile(cols[5])
+        if (!hasExtension(baiFile, "bai")) exit 1, "File: ${baiFile} has the wrong extension. See --help for more information"
+    
+        infos.add([idPatient, gender, status, idSample, bamFile, baiFile])
+    }
+    return Channel.from(infos)
+}
+
+
 def extractRecal(tsvFile) {
-    Channel.from(tsvFile)
-        .splitCsv(sep: '\t')
-        .map { row ->
-            checkNumberOfItem(row, 7)
-            def idPatient  = row[0]
-            def gender     = row[1]
-            def status     = returnStatus(row[2].toInteger())
-            def idSample   = row[3]
-            def bamFile    = returnFile(row[4])
-            def baiFile    = returnFile(row[5])
-            def recalTable = returnFile(row[6])
+    def infos = []
+
+    def allLines = tsvFile.readLines()
+    for (line in allLines){
+        info("Parsing Line: ${line}")
+
+        def trimmed = line.trim()
+        def cols = trimmed.split()
+        checkNumberOfItem(cols, 7)
+
+        info("cols[0]:${cols[0]}")
+        info("cols[1]:${cols[1]}")
+        info("cols[2]:${cols[2]}")
+        info("cols[3]:${cols[3]}")
+        info("cols[4]:${cols[4]}")
+        info("cols[5]:${cols[5]}")
+        info("cols[6]:${cols[6]}")
+
+        def idPatient  = cols[0]
+        def gender     = cols[1]
+        def status     = returnStatus(cols[2].toInteger())
+        def idSample   = cols[3]
+        def bamFile   = returnFile(cols[4])
+        def baiFile   = returnFile(cols[5])
+        def recalTable = returnFile(row[6])
 
             if (!hasExtension(bamFile, "bam")) exit 1, "File: ${bamFile} has the wrong extension. See --help for more information"
             if (!hasExtension(baiFile, "bai")) exit 1, "File: ${baiFile} has the wrong extension. See --help for more information"
-            if (!hasExtension(recalTable, "recal.table")) exit 1, "File: ${recalTable} has the wrong extension. See --help for more information"
+            if (!hasExtension(recalTable, "recal.table")) exit 1, "File: ${recalTable} has the wrong extension. See --help for more information"            
 
-            [idPatient, gender, status, idSample, bamFile, baiFile, recalTable]
+        infos.add([idPatient, gender, status, idSample, bamFile, baiFile, recalTable])
     }
+    return Channel.from(infos)
 }
 
 // Parse first line of a FASTQ file, return the flowcell id and lane number.
