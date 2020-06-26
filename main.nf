@@ -18,6 +18,8 @@ if (params.genomes && !params.genomes.containsKey(params.genome)) {
     exit 1, "The provided genome '${params.genome}' is not available in the genomes.config file. Currently the available genomes are ${params.genomes.keySet().join(", ")}"
 }
 
+
+
 stepList = defineStepList()
 step = params.step ? params.step.toLowerCase() : ''
 
@@ -27,6 +29,12 @@ if (!checkParameterExistence(step, stepList)) exit 1, "Unknown step ${step}, see
 toolList = defineToolList()
 tools = params.tools ? params.tools.split(',').collect{it.trim().toLowerCase()} : []
 if (!checkParameterList(tools, toolList)) exit 1, 'Unknown tool(s), see --help for more information'
+
+// Check if bm_dv_against_gatk selected, but deepvariant and haplotypecaller are not in the tools list
+if ( ('benchmark_dv_against_hc' in tools) && (!('haplotypecaller' in tools) || !('deepvariant' in tools) ) ) {
+    exit 1, "When benchmark_dv_against_hc selected, both HaplotypeCaller and DeepVariant needs to be in the tools list"
+}
+
 
 skipQClist = defineSkipQClist()
 skipQC = params.skip_qc ? params.skip_qc == 'all' ? skipQClist : params.skip_qc.split(',').collect{it.trim().toLowerCase()} : []
@@ -58,13 +66,10 @@ if (tsvPath) {
         default: exit 1, "Unknown step ${step}"
     }
 }
-// ch_input_sample
-//     .dump(tag: 'ch_input_sample just created!')
-// inputSample
-// .map{[it[0],it[3],it[4],it[5],it[6]]}
-// .set{ch_input_5_col}
+
 
 (genderMap, statusMap, ch_input_sample) = extractInfos(ch_input_sample)
+
 
 // ch_input_sample
 //     .dump(tag: 'ch_input_sample after extracting info!')
@@ -535,35 +540,64 @@ workflow{
     ConcatVCF(vcf_ConcatenateVCFs,
         ch_fasta_fai,
         ch_target_bed)
+    
     // Create a channel to hold GIAB samples for validation using hap.py
-    vcfs_hap_py = Channel.empty()
+    hc_jointly_genotyped_vcfs = ConcatVCF.out.vcf_concatenated
+                          .filter{  "${it[0]}" == 'HaplotypeCaller_Jointly_Genotyped'}
+                          .dump(tag: 'hc_jointly_genotyped_vcfs')
+
+    vcfs_giab = Channel.empty()
                     .mix(
-                          DV_PostprocessVariants.out.vcf,
-                        // only keep individually genotyped vcfs
-                          ConcatVCF.out.vcf_concatenated
-                          .filter{  "${it[0]}" == 'HaplotypeCaller_Jointly_Genotyped' }
+                            DV_PostprocessVariants.out.vcf,
+                            hc_jointly_genotyped_vcfs
                         )
                     .filter{
                         // The sampleID is the 3rd component of the channel elements
                         "${it[2]}".contains('GIAB')
                     }
-                    .dump(tag: "Channel for Hap_py")
-    // hap_py_against_giab = truth_set_vcf
-    //                         .map{ 
-    //                                 caller, idPatient, idSample, vcf, tbi ->
-    //                                 ['GIAB', caller, idPatient, idSample, vcf, tbi ]
-    //                             }
-    //                         .combine(ch_giab_highconf_vcf)
-    //                         .combine(ch_giab_highconf_tbi)
+                    .dump(tag: "vcfs_giab")
+    /*
+    The vcfs_giab structure:
+    ['Variant Caller', 'GIABO1', 'GIABO1_S53', GIABO1_S53.vcf.gz, GIABO1_S53.vcf.gz.tbi]
+    */
+
     hap_py_against_giab = Channel.from('GIAB')
-                            .combine(vcfs_hap_py)
+                            .combine(vcfs_giab)
                             .combine(ch_giab_highconf_vcf)
                             .combine(ch_giab_highconf_tbi)
+                            .combine(ch_giab_highconf_regions)
     
-    hap_py_against_giab.dump(tag: 'hap_py_against_giab: ')
+    // hap_py_against_giab.dump(tag: 'hap_py_against_giab: ')
+    // Create a channel to hold vcf to be validated against HaplotypeCaller
+    vcfs_against_hc = DV_PostprocessVariants.out.vcf
+                      .join(hc_jointly_genotyped_vcfs, by:[1,2])                      
+                      .map{
+                            idPatient, idSample, val_dv, dv_vcf, dv_tbi, val_hc, hc_vcf, hc_tbi ->
+                            [ val_dv, idPatient, idSample, dv_vcf, dv_tbi, hc_vcf, hc_tbi]
+                            }
+                    //   .dump(tag: 'vcfs_against_hc')
+    
+    /*
+    The vcfs_against_hc structure:
+    ['WES10', 'WES10_S21', 
+        'DeepVariant', WES10_S21.vcf.gz, WES10_S21.vcf.gz.tbi, 
+        'HaplotypeCaller_Jointly_Genotyped', HaplotypeCaller_Jointly_Genotyped_WES10_S21.vcf.gz, 
+        HaplotypeCaller_Jointly_Genotyped_WES10_S21.vcf.gz.tbi]
+    */
+    // if user has not opted for the benchmark_dv_against_hc, then just close the above channel
+    if (!('benchmark_dv_against_hc' in tools)) {
+        vcfs_against_hc = Channel.empty()
+    }
 
-    HapPy(hap_py_against_giab,
-          ch_giab_highconf_regions,
+    hap_py_against_hc = Channel.from('HC')
+                        .combine(vcfs_against_hc)
+                        .combine(ch_giab_highconf_regions)
+                        .dump(tag: 'hap_py_against_hc')
+    
+    hap_py_combined = hap_py_against_giab.mix(hap_py_against_hc)
+                      .dump(tag:'hap_py_combined')
+
+    HapPy(hap_py_combined,
           ch_target_bed,
           ch_bait_bed,
           ch_fasta,
@@ -1451,7 +1485,7 @@ process BaseRecalibrator {
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.table")
         // set idPatient, idSample into recalTableTSVnoInt
 
-    when: params.known_indels && ('HaplotypeCaller' in tools || 'mutect2' in tools)
+    when: params.known_indels && ('haplotypecaller' in tools || 'mutect2' in tools)
 
     script:
     dbsnpOptions = params.dbsnp ? "--known-sites ${dbsnp}" : ""
@@ -1491,7 +1525,7 @@ process GatherBQSRReports {
         tuple idPatient, idSample, file("${idSample}.recal.table"), emit: recal_table
         // set idPatient, idSample into recalTableTSV
 
-    when: params.known_indels && ('HaplotypeCaller' in tools || 'mutect2' in tools)
+    when: params.known_indels && ('haplotypecaller' in tools || 'mutect2' in tools)
 
     script:
     input = recal.collect{"-I ${it}"}.join(' ')
@@ -1522,7 +1556,7 @@ process ApplyBQSR {
     output:
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.bam")
 
-    when: params.known_indels && ('HaplotypeCaller' in tools || 'mutect2' in tools)
+    when: params.known_indels && ('haplotypecaller' in tools || 'mutect2' in tools)
     script:
     prefix = params.no_intervals ? "" : "${intervalBed.baseName}_"
     intervalsOptions = params.no_intervals ? "" : "-L ${intervalBed}"
@@ -1716,9 +1750,7 @@ process CollectHsMetrics{
 process HaplotypeCaller {
     label 'memory_singleCPU_task_sq'
     label 'cpus_8'
-    // label 'memory_max'
-    // label 'cpus_max'
-
+    
     tag {idSample + "-" + intervalBed.baseName}
     // tag {idSample} 
     // publishDir "${params.outdir}/VariantCalling/${idSample}/HaplotypeCaller", mode: params.publish_dir_mode
@@ -1822,7 +1854,7 @@ process GvcfToVcf{
 // STEP GATK HAPLOTYPECALLER.1.5
 process GenomicsDBImport {
     label 'cpus_16'
-    echo true
+    // echo true
     tag{interval_name}
     // publishDir "${OUT_DIR}/misc/genomicsdb/", mode: 'copy', overwrite: false
 
@@ -1975,26 +2007,24 @@ process HapPy {
 
     tag {idSample}
 
-    publishDir "${params.outdir}/Validation/Against_${truth_set}/${idSample}/${variantCaller}", mode: params.publish_dir_mode
+    publishDir "${params.outdir}/Validation/Against_${truth_set_type}/${idSample}/${variantCaller}", mode: params.publish_dir_mode
 
     input:
-        tuple truth_set, variantCaller, idPatient, idSample, file(vcf), file(tbi), file (truth_set_vcf), file (truth_set_tbi) 
-        // file(giab_highconf_vcf)
-        // file(giab_highconf_tbi)
-        file(giab_highqual_regions)
+        tuple truth_set_type, variantCaller, idPatient, idSample, file(vcf), file(tbi), file (truth_set_vcf), file (truth_set_tbi), file(highqual_regions)         
         file(target_bed)
         file(bait_bed)
         file(fasta)
         file(fastaFai)
 
     output:
-        file("hap_py.${vcf.baseName}.*")
+        file("Against_${truth_set_type}.${vcf.baseName}.*")
 
-    // when: ( 'hap_py' in tools
-    //         && ('haplotypecaller' in tools || 'mutect2' in tools || 'freebayes' in tools || 'deepvariant' in tools) 
-    //         && params.giab_highconf 
-    //         && params.giab_highconf_tbi 
-    //         && chco_highqual_snps)
+    when: ( 
+            'hap_py' in tools
+            && ('haplotypecaller' in tools || 'deepvariant' in tools) 
+            && params.giab_highconf_vcf 
+            && params.giab_highconf_tbi 
+            && params.giab_highconf_regions)
 
     script:
     // bn = "{vcf.baseName}"
@@ -2004,12 +2034,12 @@ process HapPy {
     hap.py  \
         ${truth_set_vcf} \
         ${vcf} \
-        -f ${giab_highqual_regions} \
+        -f ${highqual_regions} \
         --scratch-prefix scratch \
         --engine vcfeval \
         -T ${target_bed} \
         --threads ${task.cpus} \
-        -o hap_py.${vcf.baseName}
+        -o Against_${truth_set_type}.${vcf.baseName}
     """
 }
 
@@ -3124,6 +3154,7 @@ def defineSkipQClist() {
         'bamqc',
         'bcftools',
         'fastqc',
+        'alignment_summary',
         'markduplicates',
         'multiqc',
         'samtools',
@@ -3155,6 +3186,7 @@ def defineToolList() {
         'freebayes',
         'haplotypecaller',
         'deepvariant',
+        'benchmark_dv_against_hc',
         'hap_py',
         'manta',
         'merge',
