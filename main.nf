@@ -635,6 +635,11 @@ workflow{
                             .dump(tag: 'call_cr_seg')
 
     CallCopyRatioSegments(call_cr_seg)
+    /* SavvyCNV Somatic Copy Number related calls */
+    /* Starting point is duplicated marked bams from MarkDuplicates.out.marked_bams with the following structure */
+    /* MarkDuplicates.out.marked_bams => [idPatient, idSample, md.bam, md.bam.bai]*/
+    SavvyCNVCoverageSummary(MarkDuplicates.out.marked_bams)
+    SavvyCNV(SavvyCNVCoverageSummary.out.collect())
 
     /* Annotations */
     ch_vcfs_to_annotate = Channel.empty()
@@ -2875,56 +2880,53 @@ process CallCopyRatioSegments {
 
 // /* SavvyCNV Related processes */
 
-// process GenSavvyCNVCoverageSummary {
-//     echo true
-//     tag "$sample"
-//     // cache false
-//     publishDir "$publish_dir", mode: 'copy', overwrite: true
+process SavvyCNVCoverageSummary {
+   label 'cpus_16'
+    tag "${idSample}"
+    cache false
+    // publishDir "${params.outdir}/VariantCalling/${idSample}/SavvycnvCoverageSummary", mode: params.publish_dir_mode
     
-//     input:
-//     file(bam)
-//     file(bam_index)
+    input:
+         tuple idPatient, idSample, file(bam), file(bai)
     
-//     output:
-//     file(out_file)
-//     // file(publish_dir)
+    output:
+    file("${idSample}.coverageBinner")
 
-//     script:
-//     sample = bam.simpleName
-//     publish_dir = "${OUT_DIR}/misc/SavvyCNV_coverage_summaries"
-//     out_file = "${sample}.coverageBinner"
-    
-//     """
-//     java -Xmx1g CoverageBinner $bam >$out_file 
-//     """
-// }
+    when: 'savvycnv' in tools
 
-// process RunSavvyCNV {
-//     echo true
-//     // cache false
-//     // tag "$sample"
+    script:
     
-//     publishDir "$publish_dir", mode: 'copy', overwrite: true
-    
-//     input:
-//     file("*")
-    
-//     output:
-//     file("cnv_list.csv")
-//     file("log_messages.txt")
-//     file("*.pdf")
-//     // file()
+    """
+    java -Xmx1g CoverageBinner ${bam} > ${idSample}.coverageBinner
+    """
+}
 
-//     script:
-//     // sample = bam.simpleName
-//     publish_dir = "${OUT_DIR}/misc/SavvyCNV_calls"
-//     // out_file = "${sample}.coverageBinner"
-//     chunk_size = 200000
+process SavvyCNV {
+    label 'cpus_16'
+    // tag "${idSample}"
+    publishDir "${params.outdir}/VariantCalling/", mode: params.publish_dir_mode
     
-//     """
-//     java -Xmx30g SavvyCNV -a -d $chunk_size *.coverageBinner >cnv_list.csv 2>log_messages.txt
-//     """
-// }
+    input:
+        file("*")
+    
+    output:
+        file("SavvycnvResults")
+    
+    when: 'savvycnv' in tools
+    
+    script:
+    chunk_size = 200000
+    
+    """
+    mkdir -p SavvycnvResults/SavvycnvCoverageSummary
+    mkdir  SavvycnvResults/pdfs
+    java -Xmx30g SavvyCNV -a -d ${chunk_size} *.coverageBinner > cnv_list.csv 2>log_messages.txt
+    cp *.coverageBinner SavvycnvResults/SavvycnvCoverageSummary/
+    cp *.cnvs.pdf SavvycnvResults/pdfs
+    cp cnv_list.csv log_messages.txt SavvycnvResults/
+    """
+}
+
 /*
 ================================================================================
                                      MultiQC
