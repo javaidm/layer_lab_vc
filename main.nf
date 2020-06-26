@@ -141,7 +141,8 @@ ch_fasta = params.fasta && !('annotate' in step) ? Channel.value(file(params.fas
 // ch_intervals = params.intervals && !params.no_intervals && !('annotate' in step) ? Channel.value(file(params.intervals)) : "null"
 ch_germline_resource = params.germline_resource && 'mutect2' in tools ? Channel.value(file(params.germline_resource)) : "null"
 ch_intervals = params.intervals && !params.no_intervals && !('annotate' in step) ? Channel.value(file(params.intervals)) : "null"
-ch_pon = params.pon ? Channel.value(file(params.pon)) : "null"
+// ch_pon = params.pon ? Channel.value(file(params.pon)) : "null"
+ch_read_count_somatic_pon = params.read_count_somatic_pon ? Channel.value(file(params.read_count_somatic_pon)) : "null"
 ch_target_bed = params.target_bed ? Channel.value(file(params.target_bed)) : "null"
 ch_bait_bed = params.bait_bed ? Channel.value(file(params.bait_bed)) : "null"
 // knownIndels is currently a list of file for smallGRCh37, so transform it in a channel
@@ -183,32 +184,6 @@ ch_chco_highqual_snps = params.chco_highqual_snps ? Channel.value(file(params.ch
 
 printSummary()
 
-/* Check if the fastq needs to be split into multiple files using the Nextflow splitFastQ operator */
-// ch_input_pair_reads = Channel.empty()
-// if (params.split_fastq){
-//         // newly splitfastq are named based on split, so the name is easier to catch
-//     ch_input_pair_reads = ch_input_sample
-//         // .splitFastq(by: ÷, compress:true, file:"split", flat: true, compress: true, pe:true)
-//         .splitFastq(by: 1_000_000, compress:true, file:"split", pe:true)
-//         .map {idPatient, idSample, idRun, reads1, reads2 ->
-//             // The split fastq read1 is the 4th element (indexed 3) its name is split_3
-//             // The split fastq read2's name is split_4
-//             // It's followed by which split it's acutally based on the mother fastq file
-//             // Index start at 1
-//             // Extracting the index to get a new IdRun
-//             splitIndex = reads1.fileName.toString().minus("split_3.").minus(".gz")
-//             newIdRun = idRun + "_" + splitIndex
-//             // Giving the files a new nice name
-//             newReads1 = file("${idSample}_${newIdRun}_R1.fastq.gz")
-//             newReads2 = file("${idSample}_${newIdRun}_R2.fastq.gz")
-//             [idPatient, idSample, newIdRun, reads1, reads2]}
-// }
-// if (params.split_fastq){
-//     ch_input_pair_reads.
-//     subscribe{println (it)}
-// }
-
-
 
 workflow{
 
@@ -225,7 +200,7 @@ workflow{
     BuildDbsnpIndex(ch_dbsnp)
     BuildGermlineResourceIndex(ch_germline_resource)
     BuildKnownIndelsIndex(ch_known_indels)
-    BuildPonIndex(ch_pon)
+    BuildPonIndex(ch_read_count_somatic_pon)
 
     ch_fasta_fai = params.fasta_fai ? Channel.value(file(params.fasta_fai)) : BuildFastaFai.out
     // The following three mainly used by the DeepVariant
@@ -250,7 +225,7 @@ workflow{
         : "null"
     
     // ch_known_indels_index = params.known_indels_index && params.genome == 'smallGRCh37' ? Channel.value(li_knownIndelsIndex.collect()) : params.known_indels_index ? Channel.value(file(params.known_indels_index)) : "null"
-    ch_pon_index = params.pon_index ? Channel.value(file(params.pon_index)) : BuildPonIndex.out
+    ch_read_count_somatic_pon_index = params.read_count_somatic_pon_index ? Channel.value(file(params.read_count_somatic_pon_index)) : BuildPonIndex.out
 
     BuildIntervals(ch_fasta_fai)
     ch_intervals = params.no_intervals ? "null" : \
@@ -449,7 +424,7 @@ workflow{
         ch_dict
     )
 
-    // bam_HaplotypeCaller => [idPatiend, idSample, recalibrated bam, bam.bai, single interval to operate on]
+    // bam_HaplotypeCaller => [idPatient, idSample, recalibrated bam, bam.bai, single interval to operate on]
     // we'll reuse this channel for the mpileup as well
     bam_HaplotypeCaller = bam_recal.combine(ch_bed_intervals)
     
@@ -614,6 +589,54 @@ workflow{
         ch_fasta,
         ch_fasta_fai
     )
+
+    /* GATK Somatic Copy Number related calls */
+    /* Starting point is duplicated marked bams from MarkDuplicates.out.marked_bams with the following structure */
+    /* MarkDuplicates.out.marked_bams => [idPatient, idSample, md.bam, md.bam.bai]*/
+
+    PreprocessIntervals(ch_target_bed,
+                        ch_fasta,
+                        ch_fasta_fai,
+                        ch_dict)
+
+    CollectReadCounts(MarkDuplicates.out.marked_bams,
+                    PreprocessIntervals.out)
+
+    // CreateReadCountSomaticPON(
+    // CollectReadCounts.out.collect()
+    // )
+    
+    DenoiseReadCounts(
+        CollectReadCounts.out.sample_read_counts,
+        ch_read_count_somatic_pon
+    )
+
+    PlotDenoisedCopyRatios(DenoiseReadCounts.out.denoised_cr,
+                            ch_dict)
+    denoised_cr_model_segments = DenoiseReadCounts.out.denoised_cr
+                                .map{ idPatien, idSample, std_cr, denoised_cr ->
+                                    [idPatien, idSample, denoised_cr]
+                                     }
+
+    ModelSegments(denoised_cr_model_segments)
+    plot_modeled_segments = ModelSegments.out.modeled_seg
+                            .join(DenoiseReadCounts.out.denoised_cr, by: [0,1])
+                            .map{idPatient, idSample, cr_seg, model_final_seg, std_cr, denoised_cr -> 
+                                [idPatient, idSample, model_final_seg, denoised_cr]
+                            }
+                            .dump(tag: 'plot_modeled_segments')
+
+    PlotModeledSegments(plot_modeled_segments,
+                        ch_dict)
+    call_cr_seg = ModelSegments.out.modeled_seg                        
+                            .map{idPatient, idSample, cr_seg, model_final_seg -> 
+                                [idPatient, idSample, cr_seg]
+                            }
+                            .dump(tag: 'call_cr_seg')
+
+    CallCopyRatioSegments(call_cr_seg)
+
+    /* Annotations */
     ch_vcfs_to_annotate = Channel.empty()
     if (step == 'annotate') {
         // ch_vcfs_to_annotate = getVCFsToAnnotate(params.outdir, annotate_tools)
@@ -1423,7 +1446,7 @@ process BaseRecalibrator {
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.table")
         // set idPatient, idSample into recalTableTSVnoInt
 
-    when: params.known_indels
+    when: params.known_indels && ('HaplotypeCaller' in tools || 'mutect2' in tools)
 
     script:
     dbsnpOptions = params.dbsnp ? "--known-sites ${dbsnp}" : ""
@@ -1463,7 +1486,7 @@ process GatherBQSRReports {
         tuple idPatient, idSample, file("${idSample}.recal.table"), emit: recal_table
         // set idPatient, idSample into recalTableTSV
 
-    when: !(params.no_intervals)
+    when: params.known_indels && ('HaplotypeCaller' in tools || 'mutect2' in tools)
 
     script:
     input = recal.collect{"-I ${it}"}.join(' ')
@@ -1494,6 +1517,7 @@ process ApplyBQSR {
     output:
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.bam")
 
+    when: params.known_indels && ('HaplotypeCaller' in tools || 'mutect2' in tools)
     script:
     prefix = params.no_intervals ? "" : "${intervalBed.baseName}_"
     intervalsOptions = params.no_intervals ? "" : "-L ${intervalBed}"
@@ -2620,6 +2644,289 @@ process CompressVCFvep {
 
 /*
 ================================================================================
+                                     Somatic CNV
+================================================================================
+*/
+
+process PreprocessIntervals {
+
+    label 'cpus_8'
+    
+    input:    
+        file(intervalBed)
+        file(fasta)
+        file(fasta_fai)
+        file(dict)
+    
+    output:
+        // file("preprocessed_intervals.interval_list"), emit: 'processed_intervals'
+        file("preprocessed_intervals.interval_list")
+
+    when: 'gatkcnv' in tools
+    
+    script:
+    intervals_options = params.no_intervals ? "" : "-L ${intervalBed}"
+    padding_options =  params.no_intervals ? "--padding 0" : "--padding 250"
+    bin_options =  params.no_intervals ? "--bin-length 1000" : "--bin-length 0"
+
+    """
+    gatk PreprocessIntervals \
+        ${intervals_options} \
+        ${padding_options} \
+        ${bin_options} \
+        -R ${fasta} \
+        --interval-merging-rule OVERLAPPING_ONLY \
+        -O preprocessed_intervals.interval_list
+    """
+}
+
+process CollectReadCounts {
+    label 'cpus_32'
+    tag "${idSample}"
+    
+    input:
+        tuple idPatient, idSample, file(bam), file(bai)
+        file(preprocessed_intervals)
+
+    output:
+        tuple idPatient, idSample, file("${idSample}.counts.hdf5"), emit: 'sample_read_counts'
+
+    when: 'gatkcnv' in tools
+
+    script:
+    """
+    gatk CollectReadCounts \
+        -I ${bam} \
+        -L ${preprocessed_intervals} \
+        --interval-merging-rule OVERLAPPING_ONLY \
+        -O ${idSample}.counts.hdf5
+    """
+}
+
+// process CreateReadCountSomaticPON {
+//     echo true
+//     // tag "$sample"
+    
+//     publishDir "${OUT_DIR}/misc/read_count_somatic_pon", mode: 'copy'
+    
+//     input:
+//     // file (read_count_hdf5s:'all_read_counts/*')
+//     file(read_count_hdf5s)
+    
+//     // file(this_read)
+
+//     output:
+//     file(out_file)
+
+//     script:
+//     // sample = this_read.simpleName
+//     out_file = "cnv.pon.hdf5"
+//     params_str = ''
+
+//     // Only get the normal samples
+//     read_count_hdf5s.each{
+//         sample = it.simpleName
+//         // check if this is one of the controls/parental samples
+//         if (LLabUtils.sampleInList(sample, list_of_controls)){
+//           params_str = "${params_str} -I ${it}"
+//         }
+//     }
+
+    
+//     """
+//     gatk CreateReadCountPanelOfNormals \
+//         $params_str \
+//         -O $out_file
+//     """
+// }
+
+process DenoiseReadCounts {
+    label 'cpus_32'
+    tag "${idSample}"
+    
+    publishDir "${params.outdir}/Preprocessing/${idSample}/DenoisedReadCounts/", mode: params.publish_dir_mode
+    
+    input:
+        tuple idPatient, idSample, file( "${idSample}.counts.hdf5")
+        file(read_count_somatic_pon)
+
+    output:
+        tuple idPatient, idSample, file(std_copy_ratio), file(denoised_copy_ratio), emit: 'denoised_cr'
+
+    when: 'gatkcnv' in tools
+
+    script:
+    std_copy_ratio = "${idSample}.standardizedCR.tsv"
+    denoised_copy_ratio = "${idSample}.denoisedCR.tsv"
+    pon_option = params.read_count_somatic_pon ? "--count-panel-of-normals ${read_count_somatic_pon}" : ""
+    """
+    
+    gatk DenoiseReadCounts \
+        -I ${idSample}.counts.hdf5 \
+        ${pon_option} \
+        --standardized-copy-ratios ${std_copy_ratio} \
+        --denoised-copy-ratios ${denoised_copy_ratio}
+    """
+}
+
+process PlotDenoisedCopyRatios {
+    label 'cpus_16'
+    tag "${idSample}"
+    
+    publishDir "${params.outdir}/Preprocessing/${idSample}/", mode: params.publish_dir_mode
+    
+    input:
+        tuple idPatient, idSample, file(std_copy_ratio), file(denoised_copy_ratio)
+        file(dict)
+    
+    output:
+        file(out_dir)  
+
+    when: 'gatkcnv' in tools
+
+    script:
+    out_dir = "PlotDenoisedReadCounts" 
+
+    """
+    mkdir ${out_dir}
+    gatk PlotDenoisedCopyRatios \
+        --standardized-copy-ratios ${std_copy_ratio} \
+        --denoised-copy-ratios ${denoised_copy_ratio} \
+        --sequence-dictionary ${dict} \
+        --output-prefix ${idSample} \
+        -O ${out_dir}
+    """
+}
+
+process ModelSegments {
+    label 'cpus_32'
+    tag "${idSample}"
+
+    publishDir "${params.outdir}/VariantCalling/${idSample}", mode: params.publish_dir_mode
+    
+    input:
+         tuple idPatient, idSample, file(denoised_copy_ratio)
+
+    output:
+        tuple idPatient, idSample, file("${out_dir}/${idSample}.cr.seg"), file("${out_dir}/${idSample}.modelFinal.seg"), emit: 'modeled_seg'
+
+    when: 'gatkcnv' in tools
+
+    script:
+    out_dir = "ModeledSegments"
+
+    """
+    mkdir $out_dir
+    gatk ModelSegments \
+        --denoised-copy-ratios ${denoised_copy_ratio} \
+        --output-prefix ${idSample} \
+        -O ${out_dir}
+    """
+}
+
+process PlotModeledSegments {
+    label 'cpus_8'
+    tag "${idSample}"
+    
+    publishDir "${params.outdir}/VariantCalling/${idSample}", mode: params.publish_dir_mode
+    
+    input:
+        tuple idPatient, idSample, file("${idSample}.modelFinal.seg"), file("${idSample}.denoisedCR.tsv")
+        file(dict)
+    output:
+    file(out_dir)
+    
+    when: 'gatkcnv' in tools
+    script:
+    out_dir = "PlotsModeledSegments"
+    
+    """
+    mkdir $out_dir
+    gatk PlotModeledSegments \
+        --denoised-copy-ratios ${idSample}.denoisedCR.tsv \
+        --segments ${idSample}.modelFinal.seg \
+        --sequence-dictionary ${dict} \
+        --output-prefix ${idSample} \
+        -O $out_dir
+    """
+}
+
+process CallCopyRatioSegments {
+   label 'cpus_8'
+    tag "${idSample}"
+    
+    publishDir "${params.outdir}/VariantCalling/${idSample}/CalledCopyRatioSegments", mode: params.publish_dir_mode
+    
+    input:
+        tuple idPatient, idSample, file("${idSample}.cr.seg")
+    
+    output:
+        file("${idSample}.called.seg")
+
+    when: 'gatkcnv' in tools
+    script:
+    
+    """
+    gatk CallCopyRatioSegments \
+        -I ${idSample}.cr.seg \
+        -O ${idSample}.called.seg
+    """
+}
+
+// /* SavvyCNV Related processes */
+
+// process GenSavvyCNVCoverageSummary {
+//     echo true
+//     tag "$sample"
+//     // cache false
+//     publishDir "$publish_dir", mode: 'copy', overwrite: true
+    
+//     input:
+//     file(bam)
+//     file(bam_index)
+    
+//     output:
+//     file(out_file)
+//     // file(publish_dir)
+
+//     script:
+//     sample = bam.simpleName
+//     publish_dir = "${OUT_DIR}/misc/SavvyCNV_coverage_summaries"
+//     out_file = "${sample}.coverageBinner"
+    
+//     """
+//     java -Xmx1g CoverageBinner $bam >$out_file 
+//     """
+// }
+
+// process RunSavvyCNV {
+//     echo true
+//     // cache false
+//     // tag "$sample"
+    
+//     publishDir "$publish_dir", mode: 'copy', overwrite: true
+    
+//     input:
+//     file("*")
+    
+//     output:
+//     file("cnv_list.csv")
+//     file("log_messages.txt")
+//     file("*.pdf")
+//     // file()
+
+//     script:
+//     // sample = bam.simpleName
+//     publish_dir = "${OUT_DIR}/misc/SavvyCNV_calls"
+//     // out_file = "${sample}.coverageBinner"
+//     chunk_size = 200000
+    
+//     """
+//     java -Xmx30g SavvyCNV -a -d $chunk_size *.coverageBinner >cnv_list.csv 2>log_messages.txt
+//     """
+// }
+/*
+================================================================================
                                      MultiQC
 ================================================================================
 */
@@ -2850,6 +3157,8 @@ def defineToolList() {
         'manta',
         'merge',
         'mpileup',
+        'gatkcnv',
+        'savvycnv',
         'mutect2',
         'snpeff',
         'strelka',

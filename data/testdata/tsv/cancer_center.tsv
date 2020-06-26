@@ -1,0 +1,4 @@
+KU1919	ZZ	0	KU1919P	1	/scratch/Shares/layer/projects/cancer_center_merged_ds/KU1919P.R1.fq.gz /scratch/Shares/layer/projects/cancer_center_merged_ds/KU1919P.R2.fq.gz
+KU1919	ZZ	1	KU1919C	1	/scratch/Shares/layer/projects/cancer_center_merged_ds/KU1919C.R1.fq.gz /scratch/Shares/layer/projects/cancer_center_merged_ds/KU1919C.R2.fq.gz
+TCCsup	ZZ	0	TCCsupP	1	/scratch/Shares/layer/projects/cancer_center_merged_ds/TCCsupP.R1.fq.gz /scratch/Shares/layer/projects/cancer_center_merged_ds/TCCsupP.R2.fq.gz
+TCCsup	ZZ	1	TCCsupC	1	/scratch/Shares/layer/projects/cancer_center_merged_ds/TCCsupC.R1.fq.gz /scratch/Shares/layer/projects/cancer_center_merged_ds/TCCsupC.R2.fq.gz
