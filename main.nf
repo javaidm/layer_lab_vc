@@ -158,10 +158,8 @@ li_known_indels_index = []
 if (params.known_indels_index && ('mapping' in step || 'markdups' in step)) params.known_indels_index.each { li_known_indels_index.add(file(it)) }
 // ch_known_indels = Channel.empty()
 // ch_known_indels_index = Channel.empty()
-ch_known_indels = params.known_indels && params.genome == 'smallGRCh37' \
-    ? Channel.value(li_known_indels.collect()) \
-    : \
-    params.known_indels ? Channel.value(file(params.known_indels)) : "null"
+ch_known_indels = params.known_indels && params.genome == 'smallGRCh37' ? Channel.value(li_known_indels.collect()) 
+    : params.known_indels ? Channel.value(file(params.known_indels)) : "null"
 
 ch_known_indels_index = params.known_indels_index && params.genome == 'smallGRCh37' \
     ? Channel.value(li_known_indels_index.collect()) \
@@ -187,13 +185,22 @@ ch_giab_highconf_tbi = params.giab_highconf_tbi ? Channel.value(file(params.giab
 ch_giab_highconf_regions = params.giab_highconf_regions ? Channel.value(file(params.giab_highconf_regions)) : "null"
 ch_chco_highqual_snps = params.chco_highqual_snps ? Channel.value(file(params.chco_highqual_snps)) : "null"
 
+/* Create channels for various indices. These channels are either filled by the user parameters or 
+form inside the build_indices workflow */
+ch_fasta_fai = ch_fasta_gz = ch_fasta_gzi = ch_fasta_gz_fai \
+= ch_bwa_index = ch_dict = ch_dbsnp_index = ch_germline_resource_index \
+=  ch_read_count_somatic_pon_index = Channel.empty()
+
 printSummary()
 
+workflow wf_get_software_versions{
+    main:
+        GetSoftwareVersions()
+    emit:
+        GetSoftwareVersions.out
+} // end of wf_get_software_versions
 
-workflow{
-
-    GetSoftwareVersions()
-    // First check if various indexes are provided, if not, create them
+workflow wf_build_indexes{
     BuildFastaFai(ch_fasta)
     BuildFastaGz(ch_fasta)
     BuildFastaGzFai(ch_fasta,
@@ -206,57 +213,65 @@ workflow{
     BuildGermlineResourceIndex(ch_germline_resource)
     BuildKnownIndelsIndex(ch_known_indels)
     BuildPonIndex(ch_read_count_somatic_pon)
+    fasta_fai = params.fasta_fai ? Channel.value(file(params.fasta_fai)) : BuildFastaFai.out
+    fasta_gz = params.fasta_gz ? Channel.value(file(params.fasta_gz)) : BuildFastaGz.out
+    fasta_gz_fai = params.fasta_gz_fai ? Channel.value(file(params.fasta_gz_fai)) : BuildFastaGzFai.out
+    fasta_gzi = params.fasta_gzi ? Channel.value(file(params.fasta_gzi)) : BuildFastaGzi.out
+    bwa_index = params.bwa_index ? Channel.value(file(params.bwa_index)) : BuildBWAindexes.out
+    dict = params. dict ? Channel.value(file(params.dict)) :  BuildDict.out
 
-    ch_fasta_fai = params.fasta_fai ? Channel.value(file(params.fasta_fai)) : BuildFastaFai.out
-    // The following three mainly used by the DeepVariant
-    ch_fasta_gz = params.fasta_gz ? Channel.value(file(params.fasta_gz)) : BuildFastaGz.out
-    ch_fasta_gz_fai = params.fasta_gz_fai ? Channel.value(file(params.fasta_gz_fai)) : BuildFastaGzFai.out
-    ch_fasta_gzi = params.fasta_gzi ? Channel.value(file(params.fasta_gzi)) : BuildFastaGzi.out
-    // BuildFastaGzi.out
-    // .dump(tag: "gzi")
-    // ch_bwa_index = params.bwa_index ? Channel.fromPath(params.bwa_index) : BuildBWAindexes.out
-    ch_bwa_index = params.bwa_index ? Channel.value(file(params.bwa_index)) : BuildBWAindexes.out
-    ch_dict = params.dict ? Channel.value(file(params.dict)) : BuildDict.out
+    dbsnp_index = params.dbsnp ? \
+                    params.dbsnp_index ? Channel.value(file(params.dbsnp_index)) \
+                    : BuildDbsnpIndex.out : "null"        
     
-    ch_dbsnp_index = params.dbsnp ? \
-        params.dbsnp_index ? Channel.value(file(params.dbsnp_index)) : BuildDbsnpIndex.out \
-        : "null"
-    ch_germline_resource_index = params.germline_resource ? \
-        params.germline_resource_index ? Channel.value(file(params.germline_resource_index)) :BuildGermlineResourceIndex.out \
-        : "null"
+    germline_resource_index = params.germline_resource ? \
+                        params.germline_resource_index ? Channel.value(file(params.germline_resource_index)) \
+                        : BuildGermlineResourceIndex.out : "null"
     
-    ch_known_indels_index = params.known_indels ? \
-        params.known_indels_index ? ch_known_indels_index : BuildKnownIndelsIndex.out.collect() \
-        : "null"
     
-    // ch_known_indels_index = params.known_indels_index && params.genome == 'smallGRCh37' ? Channel.value(li_knownIndelsIndex.collect()) : params.known_indels_index ? Channel.value(file(params.known_indels_index)) : "null"
-    ch_read_count_somatic_pon_index = params.read_count_somatic_pon_index ? Channel.value(file(params.read_count_somatic_pon_index)) : BuildPonIndex.out
-
-    BuildIntervals(ch_fasta_fai)
-    ch_intervals = params.no_intervals ? "null" : \
-                    params.intervals && !('annotate' in step) ? \
-                    Channel.value(file(params.intervals)) : BuildIntervals.out
-    CreateIntervalBeds(ch_intervals)
-    // CreateIntervalBeds.out.flatten().subscribe{println(it)}
-    ch_bed_intervals = sortBedIntervalsByDescendingDuration(
-                            CreateIntervalBeds.out.flatten() )
-    
-    if (params.no_intervals && step != 'annotate') bedIntervals = Channel.from(file("no_intervals.bed"))
-    
-
-    // if (step in ['recalibrate', 'variantcalling', 'annotate']) {
-    //     inputBam.close()
-    //     inputPairReads.close()
-    // } else{
+    known_indels_index =   params.known_indels ? \
+                            params.known_indels_index ? ch_known_indels_index : \
+                            BuildKnownIndelsIndex.out.collect() \
+                            : "null"    
+    read_count_somatic_pon_index = params.read_count_somatic_pon_index ? \
+                            Channel.value(file(params.read_count_somatic_pon_index)) \
+                            : BuildPonIndex.out
+    emit:
+        fasta_fai = fasta_fai
+        fasta_gz = fasta_gz
+        fasta_gz_fai = fasta_gz_fai
+        fasta_gzi = fasta_gzi
+        bwa_index = bwa_index
+        dict = dict
+        dbsnp_index = dbsnp_index
+        germline_resource_index = germline_resource_index
+        known_indels_index = known_indels_index
+        read_count_somatic_pon_index = read_count_somatic_pon_index
         
-    // }
+} // end of wf_build_indices
+
+workflow wf_build_intervals{
+    take: fasta_fai
+    main:
+        BuildIntervals(fasta_fai)
+
+        _intervals = params.no_intervals ? "null" : \
+                params.intervals && !('annotate' in step) ? \
+                Channel.value(file(params.intervals)) : BuildIntervals.out
     
-    input_pair_reads = Channel.empty()
+        CreateIntervalBeds(_intervals)
+    emit:
+        bed_intervals = CreateIntervalBeds.out.flatten()
+}
+
+workflow wf_partition_fastq{
+    main:
+    _pair_reads = Channel.empty()
     // Close the input_pair_read if the starting step is not mapping
     if (step == 'mapping'){           
         if (params.split_fastq){
             PartitionFastQ(ch_input_sample)
-            input_pair_reads = input_pair_reads.mix(PartitionFastQ.out)
+            _pair_reads = _pair_reads.mix(PartitionFastQ.out)
             .flatMap{            
                 idPatient, idSample, idRun, reads_1, reads_2 ->
                 myList= []
@@ -271,206 +286,296 @@ workflow{
                 myList     
             }
         }else{
-            input_pair_reads = ch_input_sample
+            _pair_reads = ch_input_sample
         }
     }
-    FastQCFQ(input_pair_reads)     
+    emit:
+        pair_reads = _pair_reads
+} // end of wf_partition_fastq
+
+workflow wf_map_reads{
     
-    // input_pair_reads
-    // .dump(tag: "Input Pair Reads: ")
-    
-    
-    // input_pair_reads = Channel.empty()
-    MapReads(input_pair_reads, 
-            ch_bwa_index, 
-            ch_fasta, 
-            ch_fasta_fai)
+    take:
+        take: _input_pair_reads
+        take: _fasta
+        take: _fasta_fai
+        take: _bwa_index
+    main:
+        
+        MapReads(_input_pair_reads, 
+                _fasta, 
+                _fasta_fai,
+                _bwa_index
+        ) 
 
-    // STEP 1.5: MERGING BAM FROM MULTIPLE LANES
-    (ch_single_bams, ch_multiple_bams) = 
-    MapReads.out.bam_mapped.groupTuple(by:[0, 1])
-    .branch{
-         _: it[2].size() == 1
-        __: it[2].size() > 1
-    }
+        // STEP 1.5: MERGING BAM FROM MULTIPLE LANES
+        (single_bams, multiple_bams) = 
+        MapReads.out.bam_mapped.groupTuple(by:[0, 1])
+        .branch{
+            _: it[2].size() == 1
+            __: it[2].size() > 1
+        }
 
-    // // ch_multiple_bams.subscribe{ println it}
-    ch_single_bams = ch_single_bams.map{
-        idPatient, idSample, idRun, bam ->
-        [idPatient, idSample, bam]
-    }
-    MergeBamMapped(ch_multiple_bams)
-    
-    ch_merged_bams = Channel.empty()
-    ch_merged_bams = MergeBamMapped.out.mix(ch_single_bams)
-    
-    // Creating a TSV file to restart from this step
-    ch_merged_bams
-    .map { idPatient, idSample, bamFile ->
-        status = statusMap[idPatient, idSample]
-        gender = genderMap[idPatient]
-        bam = "${params.outdir}/Bams/${idSample}/${idSample}.bam"
-        // bai = "${params.outdir}/Bams/${idSample}/${idSample}.bai"
-        "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\n"
-    }.collectFile(
-        name: 'mapped_bam.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
-    )
-    
-    // exit 1, 'leaving early!'
-    IndexBamFile(ch_merged_bams)
-    // // Create TSV files to restart from this step
-    // IndexBamFile.out.map { idPatient, idSample ->
-    //     status = statusMap[idPatient, idSample]
-    //     gender = genderMap[idPatient]
-    //     bam = "${params.outdir}/Bams/${idSample}/${idSample}.bam"
-    //     bai = "${params.outdir}/Bams/${idSample}/${idSample}.bai"
-    //     "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"
-    // }.collectFile(
-    //     name: 'mapped_bam.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
-    // )
-    
-    if (step == 'markdups'){
-       ch_merged_bams = ch_input_sample	 
-    }
-
-   
-
-    MarkDuplicates(ch_merged_bams)
-
-    // Use Duplicated Marked Bams for DeepVariant
-    DV_MakeExamples(MarkDuplicates.out.marked_bams,
-                ch_fasta,
-                ch_fasta_fai,
-                ch_fasta_gz,
-                ch_fasta_gz_fai,
-                ch_fasta_gzi,
-                ch_target_bed)
-    
-    DV_CallVariants(DV_MakeExamples.out.shared_examples)
-    DV_PostprocessVariants(DV_CallVariants.out.variant_tf_records,
-                            ch_fasta_gz,
-                            ch_fasta_gz_fai,
-                            ch_fasta_gzi)
-
-
-    md_bams = MarkDuplicates.out.marked_bams.combine(ch_bed_intervals)
-    // md_bams = Sambamba_MD.out.combine(ch_bed_intervals)
-
-    BaseRecalibrator(md_bams,
-        ch_dbsnp,
-        ch_dbsnp_index,
-        ch_fasta,
-        ch_dict,
-        ch_fasta_fai,
-        ch_known_indels,
-        ch_known_indels_index
-    )
-
-    table_gather_bqsr_reports = 
-        !params.no_intervals ? BaseRecalibrator.out.groupTuple(by:[0, 1]) : BaseRecalibrator.out
-    GatherBQSRReports(table_gather_bqsr_reports)
-    
-    bam_apply_bqsr = MarkDuplicates.out.marked_bams
-                    .join(GatherBQSRReports.out.recal_table, by:[0,1])
-    // bam_apply_bqsr = Sambamba_MD.out
-    //                 .join(GatherBQSRReports.out.recal_table, by:[0,1])
-
-    bam_apply_bqsr = bam_apply_bqsr.combine(ch_bed_intervals)
-    ApplyBQSR(
-        bam_apply_bqsr,
-        ch_dict,
-        ch_fasta,
-        ch_fasta_fai
-    )
-    bam_merge_bam_recal = ApplyBQSR.out.groupTuple(by:[0, 1])
-    // When using intervals, merge (and in the same process index bam files)
-    MergeBamRecal(bam_merge_bam_recal)
-    // When not using intervals, just index the bam coming from ApplyBQSR
-    IndexBamRecal(bam_merge_bam_recal)
-    bam_recal = MergeBamRecal.out.bam_recal.mix(IndexBamRecal.out.bam_recal)
-    bam_recal_qc = MergeBamRecal.out.bam_recal_qc.mix(IndexBamRecal.out.bam_recal_qc)
-    // Creating a TSV file to restart from this step
-    bam_recal.map { idPatient, idSample, bamFile, baiFile ->
-        gender = genderMap[idPatient]
-        status = statusMap[idPatient, idSample]
-        bam = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam"
-        bai = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam.bai"
-        "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"
-    }.collectFile(
-        name: 'recalibrated.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
-    )
-
-    bam_recal
-        .collectFile(storeDir: "${params.outdir}/Preprocessing/TSV") {
-            idPatient, idSample, bamFile, baiFile ->
+        // // ch_multiple_bams.subscribe{ println it}
+        single_bams = single_bams.map{
+            idPatient, idSample, idRun, bam ->
+            [idPatient, idSample, bam]
+        }
+        MergeBamMapped(multiple_bams)
+        
+        merged_bams = Channel.empty()
+        merged_bams = MergeBamMapped.out.mix(single_bams)
+        IndexBamFile(merged_bams)
+        
+        // Creating a TSV file to restart from this step
+        merged_bams
+        .map { idPatient, idSample, bamFile ->
             status = statusMap[idPatient, idSample]
             gender = genderMap[idPatient]
+            bam = "${params.outdir}/Bams/${idSample}/${idSample}.bam"
+            bai = "${params.outdir}/Bams/${idSample}/${idSample}.bai"
+            "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"
+        }.collectFile(
+            name: 'mapped_bam.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
+        )
+        
+        // exit 1, 'leaving early!'
+    emit:
+        merged_bams = merged_bams
+} // end of wf_map_reads
+
+workflow wf_mark_duplicates{
+    take: _bams
+    main:
+        MarkDuplicates(_bams)
+    emit:
+        dm_bams = MarkDuplicates.out.marked_bams
+        dm_bam_stats = MarkDuplicates.out[1]
+}
+
+workflow wf_deepvariant{
+    take: _dm_bams
+    take: _target_bed
+    take: _fasta
+    take: _fasta_fai
+    take: _fasta_gz
+    take: _fasta_gz_fai
+    take: _fasta_gzi
+
+    main:
+        DV_MakeExamples(_dm_bams,
+                _fasta,
+                _fasta_fai,
+                _fasta_gz,
+                _fasta_gz_fai,
+                _fasta_gzi,
+                _target_bed)
+        DV_CallVariants(DV_MakeExamples.out.shared_examples)
+        DV_PostprocessVariants(
+        DV_CallVariants.out.variant_tf_records,
+        _fasta_gz,
+            _fasta_gz_fai,
+            _fasta_gzi
+            )
+    
+    emit:
+        vcf = DV_PostprocessVariants.out.vcf
+        vcf_to_annotate = DV_PostprocessVariants.out.vcf_to_annotate
+} // end of wf_deepvariant
+
+workflow wf_mpileup{
+    take: _int_bam_recal
+     take: _fasta
+    take: _fasta_fai
+    main:
+        Mpileup(_int_bam_recal,
+                 _fasta,
+                _fasta_fai 
+        )
+        
+        MergeMpileup(
+            Mpileup.out.groupTuple(by:[0, 1]) 
+        )
+} // end of wf_mpileup
+
+workflow wf_recal_bams{
+
+    take: _md_bams
+    take: _bed_intervals
+    take: _fasta
+    take: _fasta_fai
+    take: _dict
+    take: _dbsnp
+    take: _dbsnp_index
+    take: _known_indels
+    take: _known_indels_index
+          
+    main:
+        // Create a scattered pattern 
+        _int_md_bams = _md_bams.combine(_bed_intervals)
+        BaseRecalibrator(
+            _int_md_bams,
+            _fasta,
+            _fasta_fai,
+            _dict,
+            _dbsnp,
+            _dbsnp_index,
+            _known_indels,
+            _known_indels_index
+        )
+
+        table_gather_bqsr_reports = 
+            !params.no_intervals ? BaseRecalibrator.out.groupTuple(by:[0, 1]) : BaseRecalibrator.out
+        GatherBQSRReports(table_gather_bqsr_reports)
+        
+        bam_apply_bqsr = _md_bams
+                        .join(GatherBQSRReports.out.recal_table, by:[0,1])
+        // bam_apply_bqsr = Sambamba_MD.out
+        //                 .join(GatherBQSRReports.out.recal_table, by:[0,1])
+
+        bam_apply_bqsr = bam_apply_bqsr.combine(_bed_intervals)
+        ApplyBQSR(
+            bam_apply_bqsr,
+             _fasta,
+            _fasta_fai,
+            _dict
+        )
+
+        bam_merge_bam_recal = ApplyBQSR.out.groupTuple(by:[0, 1])
+        /* When using intervals, merge (and in the same process index bam files)
+            Which one of the MergeBamRecal, or IndexBamRecal runs is controlled by the 'when' clause
+            in the processes. We finally mix them together as we know they are mutulaly exclusive.
+        */
+        MergeBamRecal(bam_merge_bam_recal)
+        // When not using intervals, just index the bam coming from ApplyBQSR
+        IndexBamRecal(bam_merge_bam_recal)
+        bam_recal = MergeBamRecal.out.bam_recal.mix(IndexBamRecal.out.bam_recal)
+        bam_recal_qc = MergeBamRecal.out.bam_recal_qc.mix(IndexBamRecal.out.bam_recal_qc)
+        // Creating a TSV file to restart from this step
+        bam_recal.map { idPatient, idSample, bamFile, baiFile ->
+            gender = genderMap[idPatient]
+            status = statusMap[idPatient, idSample]
             bam = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam"
             bai = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam.bai"
-            ["recalibrated_${idSample}.tsv", "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"]
-    }
+            "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"
+        }.collectFile(
+            name: 'recalibrated.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
+        )
+
+        bam_recal
+            .collectFile(storeDir: "${params.outdir}/Preprocessing/TSV") {
+                idPatient, idSample, bamFile, baiFile ->
+                status = statusMap[idPatient, idSample]
+                gender = genderMap[idPatient]
+                bam = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam"
+                bai = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam.bai"
+                ["recalibrated_${idSample}.tsv", "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"]
+        }
+    emit:
+        // output structure
+        // tuple idPatient, idSample, file("${idSample}.recal.bam"), file("${idSample}.recal.bam.bai"), emit: bam_recal
+        // tuple idPatient, idSample, file("${idSample}.recal.bam"), emit: bam_recal_qc
+        bam_recal = bam_recal
+        bam_recal_qc = bam_recal_qc
+} // end of wf_recal_bams
+
+workflow wf_qc_recal_bams{
+    take: _bam_recal_qc
+    take: _target_bed
+    take: _bait_bed
+    take: _fasta
+    take: _fasta_fai
+    take: _dict
+
+    main:
+        SamtoolsStats(_bam_recal_qc)
+        CollectAlignmentSummaryMetrics(
+            _bam_recal_qc,
+            _fasta,
+            _fasta_fai,
+            _dict
+        )
+        CollectHsMetrics(
+            _bam_recal_qc,
+            _fasta,
+            _fasta_fai,
+            _dict,
+            _target_bed,
+            _bait_bed,
+        )
+    emit:
+        samtools_stats =  SamtoolsStats.out
+        alignment_summary_metrics = CollectAlignmentSummaryMetrics.out
+        hs_metrics = CollectHsMetrics.out
+} // end of wf_qc_recal_bams
+
+workflow wf_haplotypecaller{
+    take: _int_bam_recal
+    take: _fasta
+    take: _fasta_fai
+    take: _dict
+    take: _dbsnp
+    take: _dbsnp_index
+    // take: _bed_intervls
+    main:
+        HaplotypeCaller(
+            _int_bam_recal,
+            _fasta,
+            _fasta_fai,
+            _dict,
+            _dbsnp,
+            _dbsnp_index
+        )
+
+    emit: 
+        gvcf_HC = HaplotypeCaller.out.gvcf_HC
+        gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs
+} //  end of wf_haplotypecaller
+
+workflow wf_scattered_gvcfs_to_sample_gvcf_and_vcf{
+    // input structure
+    // tuple val("HaplotypeCallerGVCF"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.g.vcf")
+    take: _gvcf_HC
+    take: _target_bed
+    take: _fasta_fai
+    main:
+        ConcatVCF(
+                _gvcf_HC,
+                _fasta_fai,
+                _target_bed,
+                'HC', // prefix for output files
+                'g.vcf', // extension for the output files
+                'HC_individually_genotyped_gvcf' // output directory name
+                )
+        GvcfToVcf(
+                ConcatVCF.out.concatenated_vcf_without_index
+                )
+    emit:
+        sample_gvcf_HC = ConcatVCF.out.concatenated_vcf_with_index
+        sample_vcf_HC = GvcfToVcf.out.vcf_HaplotypeCaller
+}
 
 
-    SamtoolsStats(bam_recal_qc)
 
-    CollectAlignmentSummaryMetrics(
-        bam_recal_qc,
-        ch_fasta,
-        ch_fasta_fai,
-        ch_dict
-    )
+workflow wf_genotype_gvcf{
+    // input _scattered_gvcf_HC structure 
+    // tuple idPatient, idSample, file(intervalBed), file("${intervalBed.baseName}_${idSample}.g.vcf")
+    take: _scattered_gvcf_HC
+    take: _target_bed
+     take: _fasta
+    take: _fasta_fai
+    take: _dict
+    take: _dbsnp
+    take: _dbsnp_index
+    // take: _bed_intervls
+    main:
+    // Transform the haplotypecaller output in the above format to a format where gvcf's are gathered per interval, so carry
+    // multiple gvcf (for multiple samples)
+    // When grouping gvcf's for per interval basis, we only keep one interval bed as the list carry same intervals for each group
+    // This interval then become the key, and a disnguishing element for this joint genotyping
+    // patientSampleIdMap will have all the samples names that has a gvcf in a particular group
 
-    CollectHsMetrics(
-        bam_recal_qc,
-        ch_target_bed,
-        ch_bait_bed,
-        ch_fasta,
-        ch_fasta_fai,
-        ch_dict
-    )
-
-    // bam_HaplotypeCaller => [idPatient, idSample, recalibrated bam, bam.bai, single interval to operate on]
-    // we'll reuse this channel for the mpileup as well
-    bam_HaplotypeCaller = bam_recal.combine(ch_bed_intervals)
-    
-    Mpileup(bam_HaplotypeCaller,
-            ch_fasta,
-            ch_fasta_fai    
-    )
-    
-    MergeMpileup(
-        Mpileup.out.groupTuple(by:[0, 1]) 
-    )
-
-
-
-    HaplotypeCaller(bam_HaplotypeCaller,
-        ch_dbsnp,
-        ch_dbsnp_index,
-        ch_dict,
-        ch_fasta,
-        ch_fasta_fai
-    )
-
-    // HaplotypeCaller_BP_RESOLUTION(bam_HaplotypeCaller,
-    //     ch_dbsnp,
-    //     ch_dbsnp_index,
-    //     ch_dict,
-    //     ch_fasta,
-    //     ch_fasta_fai
-    // )
-
-    // for per sample calls, just convert the gvcf to vcf for onward concatenatoin
-    GvcfToVcf(HaplotypeCaller.out.gvcf_HaplotypeCaller)
-    vcf_HaplotypeCaller = GvcfToVcf.out.vcf_HaplotypeCaller.groupTuple(by:[0, 1, 2])
-    
-    // per interval gvcf from HaplotypeCaller for concatenate_vcf to generate per sample gvcf
-    gvcf_HaplotypeCaller = HaplotypeCaller.out.gvcf_HaplotypeCaller.groupTuple(by:[0, 1, 2])
-    
-    // per interval BP_RESOLUTION gvcf from HaplotypeCaller for concatenate_vcf to generate per sample gvcf
-    // bp_resolution_gvcf = HaplotypeCaller_BP_RESOLUTION.out.bp_resolution_gvcf.groupTuple(by:[0, 1, 2])
-    
-    mapped_gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs
+    mapped_gvcf_GenotypeGVCFs = _scattered_gvcf_HC
                                 .map{idPatient, idSample, intervalBed, gvcf ->
                                 patientSampleIdMap = [:]
                                 patientSampleIdMap['idPatient'] = idPatient
@@ -484,25 +589,33 @@ workflow{
     
     
     GenomicsDBImport(mapped_gvcf_GenotypeGVCFs)                              
-    GenotypeGVCFs(GenomicsDBImport.out,
-        ch_dbsnp,
-        ch_dbsnp_index,
-        ch_dict,
-        ch_fasta,
-        ch_fasta_fai
+    GenotypeGVCFs(
+        GenomicsDBImport.out,
+        _fasta,
+        _fasta_fai,
+        _dict,
+        _dbsnp,
+        _dbsnp_index
+    )
+    // GenotypeGVCFs output
+    //tuple val("HaplotypeCaller"),  val(patientSampleIdMap), file(interval_bed), file("vcf"), file("vcf.idx")
+    
+    // A Cohort vcf
+    vcf_cohort_concatenate_vcf = GenotypeGVCFs.out.vcf_GenotypeGVCFs
+    .map{caller, li_patient_sample_id_map, interval_bed,  vcf, vcf_idx ->
+        [vcf]
+    }
+    .collect()
+    // .dump(tag: 'cohor_vcf: ')
+
+    CohortConcatVCF(
+        vcf_cohort_concatenate_vcf,
+        _fasta_fai,
+        _target_bed,
     )
 
-    // ch_select_variants = GenotypeGVCFs.out.vcf_GenotypeGVCFs
-    // .flatMap{ caller, int_name, int_bed, li_id_patient, li_id_sample, vcf, vcf_idx ->
-    //     my_list=[]
-    //     li_id_patient.eachWithIndex { item, index ->
-    //         my_list.add([caller, li_id_patient[index], li_id_sample[index],  int_name, int_bed, vcf, vcf_idx])
-    //     }
-    //     my_list
-    // }
-    // GenotypeGVCFs.out.vcf_GenotypeGVCFs
-    // .dump(tag: 'vcf_GenotypeGVCFs output')
-    ch_select_variants = GenotypeGVCFs.out.vcf_GenotypeGVCFs
+    // Per Sample vcf (but jointly genotyped)
+     ch_select_variants = GenotypeGVCFs.out.vcf_GenotypeGVCFs
     .flatMap{ caller, li_patient_sample_id_map, interval_bed,  vcf, vcf_idx ->
         per_sample_list=[]
         li_patient_sample_id_map.each { entry ->
@@ -513,279 +626,538 @@ workflow{
     // .flatten()
     // .dump(tag: 'ch_select_variants')
 
-    SelectVariants(ch_select_variants,
-        ch_fasta,
-        ch_fasta_fai,
-        ch_dict
-        )
-    
+    SelectVariants(
+        ch_select_variants,
+        _fasta,
+        _fasta_fai,
+        _dict
+    )
+    // SelectVariants output
+    //tuple val("HaplotypeCaller_Jointly_Genotyped"), id_patient, id_sample, file("vcf")
     vcf_ConcatenateVCFs = SelectVariants.out.vcf_SelectVariants.groupTuple(by:[0, 1, 2])
     // Now add the individually called vcfs too
-    vcf_ConcatenateVCFs = vcf_ConcatenateVCFs.mix(vcf_HaplotypeCaller)
-    // .dump(tag: 'for SelctVariants')  
-    // GenotypeGVCFs(HaplotypeCaller.out.gvcf_GenotypeGVCFs,
-    // ch_dbsnp,
-    //     ch_dbsnp_index,
-    //     ch_dict,
-    //     ch_fasta,
-    //     ch_fasta_fai
-    // )
-    // vcf_ConcatenateVCFs = GenotypeGVCFs.out.vcf_GenotypeGVCFs.groupTuple(by:[0, 1, 2])
-    if (!params.no_gvcf){ // if user specified, noGVCF, skip saving the GVCFs from HaplotypeCaller, and HC BP_RESOLUTION
-        vcf_ConcatenateVCFs = vcf_ConcatenateVCFs.mix(gvcf_HaplotypeCaller)
-        // vcf_ConcatenateVCFs = vcf_ConcatenateVCFs.mix(bp_resolution_gvcf)
-    }
+    // vcf_ConcatenateVCFs = vcf_ConcatenateVCFs.mix(vcf_HaplotypeCaller)
+    // if (!params.no_gvcf){ // if user specified, noGVCF, skip saving the GVCFs from HaplotypeCaller
+    //     vcf_ConcatenateVCFs = vcf_ConcatenateVCFs.mix(gvcf_HaplotypeCaller)
+    // }
     // vcf_ConcatenateVCFs.dump('concat_vcf: ')
 
-    ConcatVCF(vcf_ConcatenateVCFs,
-        ch_fasta_fai,
-        ch_target_bed)
+    ConcatVCF(
+        vcf_ConcatenateVCFs,
+        _fasta_fai,
+        _target_bed,
+        'HC_jointly_genotyped', // prefix for output files
+        'vcf', // extension for the output files
+        'HC_jointly_genotyped_gvcf' // output directory name
+        )
     
     // Create a channel to hold GIAB samples for validation using hap.py
-    hc_jointly_genotyped_vcfs = ConcatVCF.out.vcf_concatenated
-                          .filter{  "${it[0]}" == 'HaplotypeCaller_Jointly_Genotyped'}
-                          .dump(tag: 'hc_jointly_genotyped_vcfs')
+    // hc_jointly_genotyped_vcfs = ConcatVCF.out.concatenated_vcf_with_index
+    //                       .filter{  "${it[0]}" == 'HaplotypeCaller_Jointly_Genotyped'}
+    //                     //   .dump(tag: 'hc_jointly_genotyped_vcfs')
 
+    emit:
+    vcfs_with_indexes = ConcatVCF.out.concatenated_vcf_with_index
+    vcfs_without_indexes = ConcatVCF.out.concatenated_vcf_without_index
+    // cohort_vcf_with_index = CohortConcatVCF.out.cohort_vcf_with_index
+    // cohort_vcf_without_index = CohortConcatVCF.out[1]
+} // end of wf_haplotypecaller
+
+workflow wf_hap_py{
+    take: deepvariant_vcfs
+    take: haplotypecaller_vcfs
+    take: _target_bed
+    take: _bait_bed
+    take: _fasta
+    take: _fasta_fai
+    main:
+    /* Take all vcf's from deepvariant and haplotypecaller, but filter out all but
+        those that has 'GIAB' in the sample name.
+        The truth set is going to be the GIAB vcfs obtained from their website 
+    
+    vcfs_giab structure: ['DeepVariant', 'GIABO1', 'GIABO1_S53', vcf.gz, vcf.gz.tbi]    
+        */
     vcfs_giab = Channel.empty()
                     .mix(
-                            DV_PostprocessVariants.out.vcf,
-                            hc_jointly_genotyped_vcfs
+                            deepvariant_vcfs,
+                            haplotypecaller_vcfs
                         )
                     .filter{
                         // The sampleID is the 3rd component of the channel elements
                         "${it[2]}".contains('GIAB')
                     }
                     .dump(tag: "vcfs_giab")
+
     /*
     The vcfs_giab structure:
-    ['Variant Caller', 'GIABO1', 'GIABO1_S53', GIABO1_S53.vcf.gz, GIABO1_S53.vcf.gz.tbi]
+    ['Variant Caller', idPatiend, idSample, vcf.gz, vcf.gz.tbi]
     */
 
-    hap_py_against_giab = Channel.from('GIAB')
-                            .combine(vcfs_giab)
-                            .combine(ch_giab_highconf_vcf)
-                            .combine(ch_giab_highconf_tbi)
-                            .combine(ch_giab_highconf_regions)
-    
-    // hap_py_against_giab.dump(tag: 'hap_py_against_giab: ')
-    // Create a channel to hold vcf to be validated against HaplotypeCaller
-    vcfs_against_hc = DV_PostprocessVariants.out.vcf
-                      .join(hc_jointly_genotyped_vcfs, by:[1,2])                      
+    /*
+    hap_py_against_giab structure
+    [benchmarked_against, 'source caller', idPatient, idSample, src.vcf.gz, src.vcf.gz.tbi, 
+    ['GIAB', 'DeepVariant', 'GIABO1', 'GIABO1_S53', GIABO1_S53.vcf.gz, \
+    highconf_PGandRTGphasetransfer.vcf.gz, \
+    highconf_PGandRTGphasetransfer.vcf.gz.tbi, \
+    highconf_nosomaticdel.bed]
+    */
+    hap_py_against_giab = Channel.from('GIAB') // this will be what the vcfs are being validated against
+                            .combine(vcfs_giab) // above filtered vcfs
+                            .combine(ch_giab_highconf_vcf) // truth set vcf
+                            .combine(ch_giab_highconf_tbi) // truth set index
+                            .combine(ch_giab_highconf_regions) // high quality regions from GIAB
+                            .dump(tag: 'hap_py_against_giab')
+
+    vcfs_dv_against_hc = deepvariant_vcfs
+                      .join(haplotypecaller_vcfs, by:[1,2])                      
                       .map{
                             idPatient, idSample, val_dv, dv_vcf, dv_tbi, val_hc, hc_vcf, hc_tbi ->
                             [ val_dv, idPatient, idSample, dv_vcf, dv_tbi, hc_vcf, hc_tbi]
                             }
                     //   .dump(tag: 'vcfs_against_hc')
-    
-    /*
-    The vcfs_against_hc structure:
-    ['WES10', 'WES10_S21', 
-        'DeepVariant', WES10_S21.vcf.gz, WES10_S21.vcf.gz.tbi, 
-        'HaplotypeCaller_Jointly_Genotyped', HaplotypeCaller_Jointly_Genotyped_WES10_S21.vcf.gz, 
-        HaplotypeCaller_Jointly_Genotyped_WES10_S21.vcf.gz.tbi]
-    */
-    // if user has not opted for the benchmark_dv_against_hc, then just close the above channel
-    if (!('benchmark_dv_against_hc' in tools)) {
-        vcfs_against_hc = Channel.empty()
+    hap_py_dv_against_hc =  Channel.from('hc') // this will be what the vcfs are being validated against
+                            .combine(vcfs_dv_against_hc) // above filtered vcfs
+                            .combine(ch_giab_highconf_regions) // high quality regions from GIAB
+                            .dump(tag: 'hap_py_dv_against_hc')
+
+    // For this channel to go ahead, both the haplotypecaller and the deepvariant should be in tools
+    if (!(('benchmark_dv_against_hc' in tools) && ('benchmark_dv_and_hc_against_giab' in tools))) {
+        hap_py_dv_against_hc = Channel.empty()
     }
 
-    hap_py_against_hc = Channel.from('HC')
-                        .combine(vcfs_against_hc)
-                        .combine(ch_giab_highconf_regions)
-                        .dump(tag: 'hap_py_against_hc')
-    
-    hap_py_combined = hap_py_against_giab.mix(hap_py_against_hc)
-                      .dump(tag:'hap_py_combined')
+    hap_py_combined = hap_py_against_giab.mix(hap_py_dv_against_hc)
+                       .dump(tag:'hap_py_combined')
 
     HapPy(hap_py_combined,
-          ch_target_bed,
-          ch_bait_bed,
-          ch_fasta,
-          ch_fasta_fai
-          )
+          _target_bed,
+          _bait_bed,
+         _fasta,
+         _fasta_fai
+        )
+    emit:
+        HapPy.out
+} // end of wf_hap_py
+
+workflow wf_vcf_stats{
+    // deepvariant output
+    //tuple val('DeepVariant'), idSample, file("${idSample}.vcf.gz")
+    take: _deepvariant_vcfs
+    take: _haplotypecaller_vcfs
+    main:
+        combined_vcfs = _deepvariant_vcfs
+                        .mix(_haplotypecaller_vcfs)
+                        // .dump(tag: 'vcfs_stats:')
+        BcftoolsStats(combined_vcfs)
+        Vcftools(combined_vcfs)
+    emit:
+        bcfootls_stats = BcftoolsStats.out
+        vcfootls_stats = Vcftools.out
+}
+
+workflow wf_germline_cnv{
+    // deepvariant output
+    //tuple val('DeepVariant'), idSample, file("${idSample}.vcf.gz")
+    take: _bam_recal
+    take: _target_bed
+    take: _fasta
+    take: _fasta_fai
     
-    BcftoolsStats(ConcatVCF.out.vcf_concatenated_to_annotate)
-    Vcftools(ConcatVCF.out.vcf_concatenated_to_annotate)
-
-    StrelkaSingle(bam_recal,
-        ch_fasta,
-        ch_fasta_fai,
-        ch_target_bed
+    main:
+        StrelkaSingle(
+            _bam_recal,
+            _fasta,
+            _fasta_fai,
+            _target_bed
     )
 
-    MantaSingle(bam_recal,
+        MantaSingle(
+            _bam_recal,
+            _fasta,
+            _fasta_fai,
+            _target_bed
+        )
+
+        TIDDIT(
+            _bam_recal,
+             _fasta,
+            _fasta_fai,
+        )
+} // end of wf_germline_cnv
+
+workflow wf_gatk_somatic_cnv{
+    take: _md_bam
+    take: _target_bed
+    take: _fasta
+    take: _fasta_fai
+    take: _dict
+    take: _read_count_somatic_pon
+    
+    main:
+        /* GATK Somatic Copy Number related calls */
+        /* Starting point is duplicated marked bams from MarkDuplicates.out.marked_bams with the following structure */
+        /* MarkDuplicates.out.marked_bams => [idPatient, idSample, md.bam, md.bam.bai]*/
+
+        PreprocessIntervals(_target_bed,
+                            _fasta,
+                            _fasta_fai,
+                            _dict
+                            )
+
+        CollectReadCounts(_md_bam,
+                        PreprocessIntervals.out)
+
+        // CreateReadCountSomaticPON(
+        // CollectReadCounts.out.collect()
+        // )
+        
+        DenoiseReadCounts(
+            CollectReadCounts.out.sample_read_counts,
+            _read_count_somatic_pon
+        )
+
+        PlotDenoisedCopyRatios(DenoiseReadCounts.out.denoised_cr,
+                                _dict)
+
+        denoised_cr_model_segments = DenoiseReadCounts.out.denoised_cr
+                                    .map{ idPatien, idSample, std_cr, denoised_cr ->
+                                        [idPatien, idSample, denoised_cr]
+                                        }
+
+        ModelSegments(denoised_cr_model_segments)
+        plot_modeled_segments = ModelSegments.out.modeled_seg
+                                .join(DenoiseReadCounts.out.denoised_cr, by: [0,1])
+                                .map{idPatient, idSample, cr_seg, model_final_seg, std_cr, denoised_cr -> 
+                                    [idPatient, idSample, model_final_seg, denoised_cr]
+                                }
+                                .dump(tag: 'plot_modeled_segments')
+
+        PlotModeledSegments(plot_modeled_segments,
+                            _dict)
+        call_cr_seg = ModelSegments.out.modeled_seg                        
+                                .map{idPatient, idSample, cr_seg, model_final_seg -> 
+                                    [idPatient, idSample, cr_seg]
+                                }
+                                .dump(tag: 'call_cr_seg')
+
+        CallCopyRatioSegments(call_cr_seg)
+} // end of wf_gatk_somatic_cnv
+
+workflow wf_savvy_somatic_cnv{
+    take: _md_bam
+    main:
+     /* SavvyCNV Somatic Copy Number related calls */
+    /* Starting point is duplicated marked bams from MarkDuplicates.out.marked_bams with the following structure */
+    /* MarkDuplicates.out.marked_bams => [idPatient, idSample, md.bam, md.bam.bai]*/
+    SavvyCNVCoverageSummary(_md_bam)
+    SavvyCNV(SavvyCNVCoverageSummary.out.collect())
+} // end of wf_germline_cnv
+
+workflow wf_annotate{
+    // to do
+    take: _md_bam
+    take: _fasta
+    take: _fasta_fai
+    main:
+        /* Annotations */
+        ch_vcfs_to_annotate = Channel.empty()
+        if (step == 'annotate') {
+            // ch_vcfs_to_annotate = getVCFsToAnnotate(params.outdir, annotate_tools)
+            ch_vcfs_to_annotate = Channel.empty()
+            // vcf_no_annotate = Channel.empty()
+
+            if (tsvPath == [] || !tsvPath) {
+            // Sarek, by default, annotates all available vcfs that it can find in the VariantCalling directory
+            // Excluding vcfs from FreeBayes, and g.vcf from HaplotypeCaller
+            // Basically it's: results/VariantCalling/*/{HaplotypeCaller,Manta,Mutect2,SentieonDNAseq,SentieonDNAscope,SentieonTNscope,Strelka,TIDDIT}/*.vcf.gz
+            // Without *SmallIndels.vcf.gz from Manta, and *.genome.vcf.gz from Strelka
+            // The small snippet `vcf.minus(vcf.fileName)[-2]` catches idSample
+            // This field is used to output final annotated VCFs in the correct directory
+                // log.info ("annotate_tools: ${annotate_tools}")
+                ch_vcfs_to_annotate = 
+                Channel.empty().mix(
+                Channel.fromPath("${params.outdir}/VariantCalling/*/HaplotypeCaller/*.vcf.gz")
+                    .flatten().map{vcf -> ['HaplotypeCaller', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+                // Channel.fromPath("${params.outdir}/VariantCalling/*/Manta/*[!candidate]SV.vcf.gz")
+                Channel.fromPath("${params.outdir}/VariantCalling/*/Manta/*diploidSV.vcf.gz")
+                    .flatten().map{vcf -> ['Manta', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+                Channel.fromPath("${params.outdir}/VariantCalling/*/Mutect2/*.vcf.gz")
+                    .flatten().map{vcf -> ['Mutect2', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+                Channel.fromPath("${params.outdir}/VariantCalling/*/Strelka/*{somatic,variant}*.vcf.gz")
+                    .flatten().map{vcf -> ['Strelka', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
+                Channel.fromPath("${params.outdir}/VariantCalling/*/TIDDIT/*.vcf.gz")
+                    .flatten().map{vcf -> ['TIDDIT', vcf.minus(vcf.fileName)[-2].toString(), vcf]}
+                )
+                .filter {
+                    annotate_tools == [] || (annotate_tools != [] && it[0] in annotate_tools)
+                }
+            } else if (annotate_tools == []) {
+            // Annotate user-submitted VCFs
+            // If user-submitted, Sarek assume that the idSample should be assumed automatically
+            ch_vcfs_to_annotate = Channel.fromPath(tsvPath)
+                .map{vcf -> ['userspecified', vcf.minus(vcf.fileName)[-2].toString(), vcf]}
+            } else exit 1, "specify only tools or files to annotate, not both"
+        }
+        
+        // log.info "annotate_tools: ${annotate_tools}"
+        // ch_vcfs_to_annotate.dump(tag: 'ch_vcf_to_annotate')
+        ch_vcfs_to_annotate = ch_vcfs_to_annotate.mix(
+                            ConcatVCF.out.vcf_concatenated_to_annotate,
+                            StrelkaSingle.out.map{
+                                variantcaller, idPatient, idSample, vcf, tbi ->
+                                    [variantcaller, idSample, vcf[1]]
+                            },
+                            MantaSingle.out.map {
+                                variantcaller, idPatient, idSample, vcf, tbi ->
+                                [variantcaller, idSample, vcf[2]]
+                            },
+                            TIDDIT.out.vcfTIDDIT.map {
+                                variantcaller, idPatient, idSample, vcf, tbi ->
+                                [variantcaller, idSample, vcf]
+                                }
+                            )
+
+        // ch_vcf_snpEff = ch_vcfs_to_annotate.mix(ConcatVCF.out.vcf_concatenated_to_annotate)
+        ch_vcf_snpEff = ch_vcfs_to_annotate
+        // ch_vcf_snpEff = Channel.empty()
+
+    ch_vcf_vep = ch_vcf_snpEff.map {
+                variantCaller, idSample, vcf ->
+                [variantCaller, idSample, vcf, null]
+        }
+    //     // PrintCh(ch_vcf_snpeff)
+        SnpEff( ch_vcf_snpEff,
+                ch_snpEff_cache,
+                ch_snpEff_db
+                )
+        CompressVCFsnpEff(SnpEff.out.snpEff_vcf)
+        
+        VEP(ch_vcf_vep,
+            ch_vep_cache,
+            ch_vep_cache_version,
+            ch_cadd_InDels,
+            ch_cadd_InDels_tbi,
+            ch_cadd_WG_SNVs,
+            ch_cadd_WG_SNVs_tbi,
+            _fasta,
+            _fasta_fai
+        )
+
+        VEPmerge(CompressVCFsnpEff.out.compressVCFsnpEffOut,
+            ch_vep_cache,
+            ch_vep_cache_version,
+            ch_cadd_InDels,
+            ch_cadd_InDels_tbi,
+            ch_cadd_WG_SNVs,
+            ch_cadd_WG_SNVs_tbi,
+            _fasta,
+            _fasta_fai
+        )
+        CompressVCFvep(VEP.out.vep_vcf.mix(
+                        VEPmerge.out.vep_vcf_merge)
+                        )
+} // end of wf_germline_cnv
+
+workflow wf_multiqc{
+    // to do
+    take: software_versions 
+    take: fastqc_out 
+    take: bcftools_out 
+    take: vcftools_out 
+    take: dm_bam_stats
+    take: samtools_stats
+    take: alignment_summary_metrics
+    take: hs_metrics
+
+    main:
+        MultiQC(
+            Channel.value(""),
+            software_versions,
+            fastqc_out,
+            bcftools_out,
+            vcftools_out,
+            dm_bam_stats,
+            samtools_stats,
+            alignment_summary_metrics,
+            hs_metrics
+            // SnpEff.out.snpEff_report,
+        )
+} // end of wf_germline_cnv
+
+workflow{
+
+    wf_get_software_versions()
+    wf_build_indexes()
+
+    // ch_fasta_fai = params.fasta_fai ? Channel.value(file(params.fasta_fai)) : wf_build_indices.out.fasta_fai
+    // // The following three mainly used by the DeepVariant
+    // ch_fasta_gz = params.fasta_gz ? Channel.value(file(params.fasta_gz)) : wf_build_indices.out.fasta_gz
+    // ch_fasta_gz_fai = params.fasta_gz_fai ? Channel.value(file(params.fasta_gz_fai)) : wf_build_indices.out.fasta_gz_fai
+    // ch_fasta_gzi = params.fasta_gzi ? Channel.value(file(params.fasta_gzi)) : wf_build_indices.out.fasta_gzi
+    // ch_bwa_index = params.bwa_index ? Channel.value(file(params.bwa_index)) : wf_build_indices.out.bwa_indexes
+    // ch_dict = params.dict ? Channel.value(file(params.dict)) : wf_build_indices.out.dict
+    
+    // ch_dbsnp_index = params.dbsnp ? \
+    //     params.dbsnp_index ? Channel.value(file(params.dbsnp_index)) : wf_build_indices.out.dbsnp_index \
+    //     : "null"
+    // ch_germline_resource_index = params.germline_resource ? \
+    //     params.germline_resource_index ? Channel.value(file(params.germline_resource_index)) \
+    //     : wf_build_indices.out.germline_resource_index : "null"
+    
+    // ch_known_indels_index = params.known_indels ? \
+    //     params.known_indels_index ? ch_known_indels_index : wf_build_indices.out.known_indels_index.collect() \
+    //     : "null"    
+    // ch_read_count_somatic_pon_index = params.read_count_somatic_pon_index ? Channel.value(file(params.read_count_somatic_pon_index)) \
+    // : wf_build_indices.out.pon_index
+    
+    ch_fasta_fai =  wf_build_indexes.out.fasta_fai
+    // The following three mainly used by the DeepVariant
+    ch_fasta_gz =  wf_build_indexes.out.fasta_gz
+    ch_fasta_gz_fai =  wf_build_indexes.out.fasta_gz_fai
+    ch_fasta_gzi =  wf_build_indexes.out.fasta_gzi
+    ch_bwa_index =  wf_build_indexes.out.bwa_index
+    ch_dict =  wf_build_indexes.out.dict
+    ch_dbsnp_index = wf_build_indexes.out.dbsnp_index
+    ch_germline_resource_index = wf_build_indexes.out.germline_resource_index
+    ch_known_indels_index = wf_build_indexes.out.known_indels_index.collect()
+    ch_read_count_somatic_pon_index = wf_build_indexes.out.read_count_somatic_pon_index
+    
+    wf_build_intervals(ch_fasta_fai)
+    ch_bed_intervals = wf_build_intervals.out.bed_intervals
+    if (params.no_intervals && step != 'annotate') ch_bed_intervals = Channel.from(file("no_intervals.bed"))
+    wf_partition_fastq()
+    ch_input_pair_reads = wf_partition_fastq.out.pair_reads
+
+    FastQCFQ(ch_input_pair_reads)     
+    
+    wf_map_reads(
+            ch_input_pair_reads, 
+            ch_fasta,
+            ch_fasta_fai,
+            ch_bwa_index
+    )
+    
+    ch_merged_bams = wf_map_reads.out.merged_bams
+    
+    if (step == 'markdups'){
+       ch_merged_bams = ch_input_sample	 
+    }
+
+   
+    wf_mark_duplicates(ch_merged_bams)
+
+    // Use Duplicated Marked Bams for DeepVariant
+    wf_deepvariant(
+                wf_mark_duplicates.out.dm_bams,
+                ch_target_bed,
+                ch_fasta,
+                ch_fasta_fai,
+                ch_fasta_gz,
+                ch_fasta_gz_fai,
+                ch_fasta_gzi
+                )
+
+    ch_int_dm_bams = wf_mark_duplicates.out.dm_bams.combine(ch_bed_intervals)
+    
+    wf_mpileup(
+        ch_int_dm_bams,
         ch_fasta,
-        ch_fasta_fai,
-        ch_target_bed
+            ch_fasta_fai
     )
 
-    TIDDIT(bam_recal,
+    wf_recal_bams(
+            wf_mark_duplicates.out.dm_bams,
+            ch_bed_intervals,
+            ch_fasta,
+            ch_fasta_fai,         
+            ch_dict,
+            ch_dbsnp,
+            ch_dbsnp_index,
+            ch_known_indels,
+            ch_known_indels_index
+    )
+
+    // bam_recal = wf_recal_bams.out.bam_recal
+    wf_qc_recal_bams(
+            wf_recal_bams.out.bam_recal_qc,
+            ch_target_bed,
+            ch_bait_bed,
+            ch_fasta,
+            ch_fasta_fai,         
+            ch_dict
+            )
+
+    // bam_HaplotypeCaller => [idPatient, idSample, recalibrated bam, bam.bai, single interval to operate on]
+    
+    ch_int_bam_recal = wf_recal_bams.out.bam_recal
+                        .combine(ch_bed_intervals)
+   
+    wf_haplotypecaller(
+        ch_int_bam_recal,
+        ch_fasta,
+        ch_fasta_fai,         
+        ch_dict,
+        ch_dbsnp,
+        ch_dbsnp_index
+    )
+
+    wf_scattered_gvcfs_to_sample_gvcf_and_vcf(
+        wf_haplotypecaller.out.gvcf_HC,
+        ch_target_bed,
+        ch_fasta_fai
+    )
+
+    wf_genotype_gvcf(
+        wf_haplotypecaller.out.gvcf_GenotypeGVCFs,
+        ch_target_bed,
+         ch_fasta,
+        ch_fasta_fai,         
+        ch_dict,
+        ch_dbsnp,
+        ch_dbsnp_index
+    )
+
+    wf_hap_py(
+        wf_deepvariant.out.vcf,
+        wf_genotype_gvcf.out.vcfs_with_indexes,
+        ch_target_bed,
+        ch_bait_bed,
+          ch_fasta,
+        ch_fasta_fai
+    )
+    
+    wf_germline_cnv(
+        wf_recal_bams.out.bam_recal,
+        ch_target_bed,
         ch_fasta,
         ch_fasta_fai
     )
 
-    /* GATK Somatic Copy Number related calls */
-    /* Starting point is duplicated marked bams from MarkDuplicates.out.marked_bams with the following structure */
-    /* MarkDuplicates.out.marked_bams => [idPatient, idSample, md.bam, md.bam.bai]*/
-
-    PreprocessIntervals(ch_target_bed,
-                        ch_fasta,
-                        ch_fasta_fai,
-                        ch_dict)
-
-    CollectReadCounts(MarkDuplicates.out.marked_bams,
-                    PreprocessIntervals.out)
-
-    // CreateReadCountSomaticPON(
-    // CollectReadCounts.out.collect()
-    // )
-    
-    DenoiseReadCounts(
-        CollectReadCounts.out.sample_read_counts,
+    wf_gatk_somatic_cnv (
+        wf_mark_duplicates.out.dm_bams,
+        ch_target_bed,
+        ch_fasta,
+        ch_fasta_fai,         
+        ch_dict,
         ch_read_count_somatic_pon
     )
 
-    PlotDenoisedCopyRatios(DenoiseReadCounts.out.denoised_cr,
-                            ch_dict)
-    denoised_cr_model_segments = DenoiseReadCounts.out.denoised_cr
-                                .map{ idPatien, idSample, std_cr, denoised_cr ->
-                                    [idPatien, idSample, denoised_cr]
-                                     }
+    wf_savvy_somatic_cnv(wf_mark_duplicates.out.dm_bams)
+    wf_vcf_stats(wf_deepvariant.out.vcf,
+        wf_genotype_gvcf.out.vcfs_with_indexes
+        )
 
-    ModelSegments(denoised_cr_model_segments)
-    plot_modeled_segments = ModelSegments.out.modeled_seg
-                            .join(DenoiseReadCounts.out.denoised_cr, by: [0,1])
-                            .map{idPatient, idSample, cr_seg, model_final_seg, std_cr, denoised_cr -> 
-                                [idPatient, idSample, model_final_seg, denoised_cr]
-                            }
-                            .dump(tag: 'plot_modeled_segments')
-
-    PlotModeledSegments(plot_modeled_segments,
-                        ch_dict)
-    call_cr_seg = ModelSegments.out.modeled_seg                        
-                            .map{idPatient, idSample, cr_seg, model_final_seg -> 
-                                [idPatient, idSample, cr_seg]
-                            }
-                            .dump(tag: 'call_cr_seg')
-
-    CallCopyRatioSegments(call_cr_seg)
-    /* SavvyCNV Somatic Copy Number related calls */
-    /* Starting point is duplicated marked bams from MarkDuplicates.out.marked_bams with the following structure */
-    /* MarkDuplicates.out.marked_bams => [idPatient, idSample, md.bam, md.bam.bai]*/
-    SavvyCNVCoverageSummary(MarkDuplicates.out.marked_bams)
-    SavvyCNV(SavvyCNVCoverageSummary.out.collect())
-
-    /* Annotations */
-    ch_vcfs_to_annotate = Channel.empty()
-    if (step == 'annotate') {
-        // ch_vcfs_to_annotate = getVCFsToAnnotate(params.outdir, annotate_tools)
-        ch_vcfs_to_annotate = Channel.empty()
-        // vcf_no_annotate = Channel.empty()
-
-        if (tsvPath == [] || !tsvPath) {
-        // Sarek, by default, annotates all available vcfs that it can find in the VariantCalling directory
-        // Excluding vcfs from FreeBayes, and g.vcf from HaplotypeCaller
-        // Basically it's: results/VariantCalling/*/{HaplotypeCaller,Manta,Mutect2,SentieonDNAseq,SentieonDNAscope,SentieonTNscope,Strelka,TIDDIT}/*.vcf.gz
-        // Without *SmallIndels.vcf.gz from Manta, and *.genome.vcf.gz from Strelka
-        // The small snippet `vcf.minus(vcf.fileName)[-2]` catches idSample
-        // This field is used to output final annotated VCFs in the correct directory
-            // log.info ("annotate_tools: ${annotate_tools}")
-            ch_vcfs_to_annotate = 
-            Channel.empty().mix(
-            Channel.fromPath("${params.outdir}/VariantCalling/*/HaplotypeCaller/*.vcf.gz")
-                .flatten().map{vcf -> ['HaplotypeCaller', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
-            // Channel.fromPath("${params.outdir}/VariantCalling/*/Manta/*[!candidate]SV.vcf.gz")
-            Channel.fromPath("${params.outdir}/VariantCalling/*/Manta/*diploidSV.vcf.gz")
-                .flatten().map{vcf -> ['Manta', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
-            Channel.fromPath("${params.outdir}/VariantCalling/*/Mutect2/*.vcf.gz")
-                .flatten().map{vcf -> ['Mutect2', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
-            Channel.fromPath("${params.outdir}/VariantCalling/*/Strelka/*{somatic,variant}*.vcf.gz")
-                .flatten().map{vcf -> ['Strelka', vcf.minus(vcf.fileName)[-2].toString(), vcf]},
-            Channel.fromPath("${params.outdir}/VariantCalling/*/TIDDIT/*.vcf.gz")
-                .flatten().map{vcf -> ['TIDDIT', vcf.minus(vcf.fileName)[-2].toString(), vcf]}
-            )
-            .filter {
-                annotate_tools == [] || (annotate_tools != [] && it[0] in annotate_tools)
-            }
-        } else if (annotate_tools == []) {
-        // Annotate user-submitted VCFs
-        // If user-submitted, Sarek assume that the idSample should be assumed automatically
-        ch_vcfs_to_annotate = Channel.fromPath(tsvPath)
-            .map{vcf -> ['userspecified', vcf.minus(vcf.fileName)[-2].toString(), vcf]}
-        } else exit 1, "specify only tools or files to annotate, not both"
-    }
-    
-    // log.info "annotate_tools: ${annotate_tools}"
-    // ch_vcfs_to_annotate.dump(tag: 'ch_vcf_to_annotate')
-    ch_vcfs_to_annotate = ch_vcfs_to_annotate.mix(
-                          ConcatVCF.out.vcf_concatenated_to_annotate,
-                          StrelkaSingle.out.map{
-                               variantcaller, idPatient, idSample, vcf, tbi ->
-                                [variantcaller, idSample, vcf[1]]
-                          },
-                           MantaSingle.out.map {
-                            variantcaller, idPatient, idSample, vcf, tbi ->
-                            [variantcaller, idSample, vcf[2]]
-                        },
-                        TIDDIT.out.vcfTIDDIT.map {
-                            variantcaller, idPatient, idSample, vcf, tbi ->
-                            [variantcaller, idSample, vcf]
-                            }
-                        )
-
-    // ch_vcf_snpEff = ch_vcfs_to_annotate.mix(ConcatVCF.out.vcf_concatenated_to_annotate)
-    ch_vcf_snpEff = ch_vcfs_to_annotate
-    // ch_vcf_snpEff = Channel.empty()
-
-   ch_vcf_vep = ch_vcf_snpEff.map {
-            variantCaller, idSample, vcf ->
-            [variantCaller, idSample, vcf, null]
-    }
-//     // PrintCh(ch_vcf_snpeff)
-    SnpEff( ch_vcf_snpEff,
-            ch_snpEff_cache,
-            ch_snpEff_db
-            )
-    CompressVCFsnpEff(SnpEff.out.snpEff_vcf)
-    
-    VEP(ch_vcf_vep,
-        ch_vep_cache,
-        ch_vep_cache_version,
-        ch_cadd_InDels,
-        ch_cadd_InDels_tbi,
-        ch_cadd_WG_SNVs,
-        ch_cadd_WG_SNVs_tbi,
-        ch_fasta,
-        ch_fasta_fai
-    )
-
-    VEPmerge(CompressVCFsnpEff.out.compressVCFsnpEffOut,
-        ch_vep_cache,
-        ch_vep_cache_version,
-        ch_cadd_InDels,
-        ch_cadd_InDels_tbi,
-        ch_cadd_WG_SNVs,
-        ch_cadd_WG_SNVs_tbi,
-        ch_fasta,
-        ch_fasta_fai
-    )
-    CompressVCFvep(VEP.out.vep_vcf.mix(
-                    VEPmerge.out.vep_vcf_merge)
-                    )
-    
-    MultiQC(
-        // Channel.value(params.multiqc_config ? file(params.multiqc_config) : ""),
-        Channel.value(""),
-        GetSoftwareVersions.out,
-        BcftoolsStats.out,
+    wf_multiqc(
+        wf_get_software_versions.out,
         FastQCFQ.out.collect().ifEmpty([]),
-        MarkDuplicates.out[1],
-        SamtoolsStats.out,
-        SnpEff.out.snpEff_report,
-        Vcftools.out,
-        CollectHsMetrics.out,
-        CollectAlignmentSummaryMetrics.out
+        wf_vcf_stats.out.bcfootls_stats,
+        wf_vcf_stats.out.vcfootls_stats,
+        wf_mark_duplicates.out.dm_bam_stats,
+        wf_qc_recal_bams.out.samtools_stats,
+        wf_qc_recal_bams.out.alignment_summary_metrics,
+        wf_qc_recal_bams.out.hs_metrics
     )
+//    wf_annotate()
+//    wf_multiqc()
 } // end of workflow
 
 
@@ -1327,9 +1699,9 @@ process MapReads {
 
     input:
         tuple idPatient, idSample, idRun, file(inputFile1), file(inputFile2)
-        file(bwaIndex) 
         file(fasta) 
         file(fastaFai)
+        file(bwaIndex) 
 
     output:
         // tuple idPatient, idSample, idRun, file("${idSample}_${idRun}.bam")
@@ -1439,7 +1811,7 @@ process MarkDuplicates {
 
     output:
         tuple idPatient, idSample, file("${idSample}.md.bam"), file("${idSample}.md.bai"), emit: marked_bams
-        // file ("${idSample}.bam.metrics"), emit: mark_duplicates_reports
+        // tuple file ("${idSample}.bam.metrics"), emit: bam_stats
         file ("${idSample}.bam.metrics")
 
     when: params.known_indels
@@ -1473,11 +1845,11 @@ process BaseRecalibrator {
 
     input:
         tuple idPatient, idSample, file(bam), file(bai), file(intervalBed)
+        file(fasta) 
+        file(fastaFai)
+        file(dict)
         file(dbsnp)
         file(dbsnpIndex) 
-        file(fasta) 
-        file(dict)
-        file(fastaFai)
         file(knownIndels)
         file(knownIndelsIndex)
 
@@ -1485,7 +1857,7 @@ process BaseRecalibrator {
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.table")
         // set idPatient, idSample into recalTableTSVnoInt
 
-    when: params.known_indels && ('haplotypecaller' in tools || 'mutect2' in tools)
+    // when: params.known_indels && ('haplotypecaller' in tools || 'mutect2' in tools)
 
     script:
     dbsnpOptions = params.dbsnp ? "--known-sites ${dbsnp}" : ""
@@ -1549,9 +1921,9 @@ process ApplyBQSR {
 
     input:
         tuple idPatient, idSample, file(bam), file(bai), file(recalibrationReport), file(intervalBed)
-        file(dict)
         file(fasta)
         file(fastaFai) 
+        file(dict)
 
     output:
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.bam")
@@ -1713,11 +2085,11 @@ process CollectHsMetrics{
     
     input:
     tuple idPatient, idSample, file(bam)
-    file(targetBED)
-    file(baitBED)
     file(fasta) 
     file(fastaFai)
     file(dict)
+    file(targetBED)
+    file(baitBED)
 
     output:
     file("${bam.baseName}_hs_metrics.txt")
@@ -1757,14 +2129,14 @@ process HaplotypeCaller {
     input:
         tuple idPatient, idSample, file(bam), file(bai), file(intervalBed) 
         // tuple idPatient, idSample, file(bam), file(bai) 
-        file(dbsnp)
-        file(dbsnpIndex)
-        file(dict)
         file(fasta)
         file(fastaFai)
+        file(dict)
+        file(dbsnp)
+        file(dbsnpIndex)
 
     output:
-        tuple val("HaplotypeCallerGVCF"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_HaplotypeCaller
+        tuple val("HaplotypeCallerGVCF"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_HC
         // tuple idPatient, idSample, file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_HaplotypeCaller
         tuple idPatient, idSample, file(intervalBed), file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_GenotypeGVCFs
         // tuple val("${intervalBed.baseName}"), idPatient, idSample, file(intervalBed), file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: gvcf_GenotypeGVCFs
@@ -1785,43 +2157,6 @@ process HaplotypeCaller {
     """
 }
 
-// process HaplotypeCaller_BP_RESOLUTION {
-//     label 'memory_singleCPU_task_sq'
-//     label 'cpus_8'
-//     // label 'memory_max'
-//     // label 'cpus_max'
-
-//     tag {idSample + "-" + intervalBed.baseName}
-//     // tag {idSample} 
-//     // publishDir "${params.outdir}/VariantCalling/${idSample}/HaplotypeCaller", mode: params.publish_dir_mode
-//     input:
-//         tuple idPatient, idSample, file(bam), file(bai), file(intervalBed) 
-//         // tuple idPatient, idSample, file(bam), file(bai) 
-//         file(dbsnp)
-//         file(dbsnpIndex)
-//         file(dict)
-//         file(fasta)
-//         file(fastaFai)
-
-//     output:
-//         tuple val("HaplotypeCallerGVCF_BP_RESOLUTION"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.g.vcf"), emit: bp_resolution_gvcf
-
-//     when: 'haplotypecaller' in tools
-
-//     script:
-//     """
-//     gatk --java-options "-Xmx${task.memory.toGiga()}g -Xms6000m -XX:GCTimeLimit=50 -XX:GCHeapFreeLimit=10" \
-//         HaplotypeCaller \
-//         -R ${fasta} \
-//         -I ${bam} \
-//         -L ${intervalBed} \
-//         -D ${dbsnp} \
-//         -O ${intervalBed.baseName}_${idSample}.g.vcf \
-//         -ERC BP_RESOLUTION
-//     """
-// }
-
-
 process GvcfToVcf{
     label 'memory_singleCPU_task_sq'
     label 'cpus_2'
@@ -1830,7 +2165,7 @@ process GvcfToVcf{
 
     tag {idSample + "-" + gvcf.baseName}
     // tag {idSample} 
-    // publishDir "${params.outdir}/VariantCalling/${idSample}/HaplotypeCaller", mode: params.publish_dir_mode
+    publishDir "${params.outdir}/VariantCalling/${idSample}/HC_individually_genotyped_vcf", mode: params.publish_dir_mode
     input:
         tuple val(variantCaller), idPatient, idSample, file(gvcf)
 
@@ -1844,10 +2179,13 @@ process GvcfToVcf{
     // fn=gvcf.fileName
     // prefix=fn.minus(".g.vcf")
     // out_file="${gvcf.fileName}.vcf"
-    prefix="${gvcf.fileName}" - ".g.vcf"
+    prefix="${gvcf.fileName}" - ".g.vcf.gz"
+    // We'll first decompress the gvcf
+    in_file= "${gvcf.fileName}" - ".gz"
     out_file="${prefix}.vcf"
     """
-    extract_variants < $gvcf > $out_file
+    gzip -d --force ${gvcf}
+    extract_variants < ${in_file} > ${out_file}
     """
 }
 
@@ -1905,11 +2243,11 @@ process GenotypeGVCFs {
     input:
         // tuple val(interval_name), file(interval_bed), val(list_id_patient), val(list_id_sample), file(gdb)
         tuple val(interval_name), file(interval_bed), val(patientSampleIdMap), file(gdb)
-        file(dbsnp)
-        file(dbsnpIndex)
-        file(dict)
         file(fasta)
         file(fastaFai)
+        file(dict)
+        file(dbsnp)
+        file(dbsnpIndex)
 
     output:
     // tuple val("HaplotypeCaller"), list_id_patient, list_id_sample, file("${interval_name}.vcf"), file("${interval_name}.vcf.idx"), emit: vcf_GenotypeGVCFs
@@ -1967,32 +2305,59 @@ process ConcatVCF {
 
     tag {variantCaller + "-" + idSample}
 
-    publishDir "${params.outdir}/VariantCalling/${idSample}/${"$variantCaller"}", mode: params.publish_dir_mode
+    publishDir "${params.outdir}/VariantCalling/${idSample}/${output_dir}", mode: params.publish_dir_mode
 
     input:
         tuple variantCaller, idPatient, idSample, file(vcFiles)
         file(fastaFai)
         file(targetBED)
+        val(output_file_prefix)
+        val(output_file_ext)
+        val(output_dir)
 
     output:
     // we have this funny *_* pattern to avoid copying the raw calls to publishdir
-        tuple variantCaller, idPatient, idSample, file("*_*.vcf.gz"), file("*_*.vcf.gz.tbi"), emit: vcf_concatenated
-        tuple variantCaller, idSample, file("*_*.vcf.gz"), emit: vcf_concatenated_to_annotate
+        // tuple variantCaller, idPatient, idSample, file("*_*.vcf.gz"), file("*_*.vcf.gz.tbi"), emit: concatenated_vcf_with_index
+        // tuple variantCaller, idPatient, idSample, file("*_*.vcf.gz"), emit: concatenated_vcf_without_index
+        tuple variantCaller, idPatient, idSample, file("${outFile}.gz"), file("${outFile}.gz.tbi"), emit: concatenated_vcf_with_index
+        tuple variantCaller, idPatient, idSample, file("${outFile}.gz"), emit: concatenated_vcf_without_index
 
     when: ('haplotypecaller' in tools || 'mutect2' in tools || 'freebayes' in tools)
 
     script:
-    if (variantCaller == 'HaplotypeCallerGVCF') 
-      outputFile = "HaplotypeCaller_${idSample}.g.vcf"
-    else if (variantCaller == 'HaplotypeCallerGVCF_BP_RESOLUTION') 
-      outputFile = "HaplotypeCaller_BP_RESOLUTION_${idSample}.g.vcf"
-    else if (variantCaller == "Mutect2") 
-      outputFile = "unfiltered_${variantCaller}_${idSample}.vcf"
-    else 
-      outputFile = "${variantCaller}_${idSample}.vcf"
+    outFile =  "${output_file_prefix}_${idSample}.${output_file_ext}"
     options = params.target_bed ? "-t ${targetBED}" : ""
     """
-    concatenateVCFs.sh -i ${fastaFai} -c ${task.cpus} -o ${outputFile} ${options}
+    concatenateVCFs.sh -i ${fastaFai} -c ${task.cpus} -o ${outFile} ${options}
+    """
+}
+
+process CohortConcatVCF {
+    label 'cpus_8'
+
+    tag {'CohortConcatVCF'}
+
+    publishDir "${params.outdir}/VariantCalling/HC_cohort_vcf", mode: params.publish_dir_mode
+
+    input:
+        file(vcFiles)
+        file(fastaFai)
+        file(targetBED)
+
+    output:
+    // we have this funny *_* pattern to avoid copying the raw calls to publishdir
+        tuple file("HC_cohort.vcf.gz"), file("HC_cohort.vcf.gz.tbi"), emit: cohort_vcf_with_index
+        // tuple file("HC_cohort.vcf.gz"), emit: cohort_vcf_without_index
+        file("HC_cohort.vcf.gz")
+        // file("HC_cohort.vcf.gz"), file("HC_cohort.vcf.gz.tbi"), emit: cohortvcfwithindex
+        // file("HC_cohort.vcf.gz"), emit: cohortvcfwithoutindex
+
+    when: ('haplotypecaller' in tools || 'mutect2' in tools || 'freebayes' in tools)
+
+    script:
+    options = params.target_bed ? "-t ${targetBED}" : ""
+    """
+    concatenateVCFs.sh -i ${fastaFai} -c ${task.cpus} -o HC_cohort.vcf ${options}
     """
 }
 
@@ -2020,11 +2385,12 @@ process HapPy {
         file("Against_${truth_set_type}.${vcf.baseName}.*")
 
     when: ( 
-            'hap_py' in tools
+            ('benchmark_dv_and_hc_against_giab' in tools || 'benchmark_dv_against_hc' in tools )
             && ('haplotypecaller' in tools || 'deepvariant' in tools) 
             && params.giab_highconf_vcf 
             && params.giab_highconf_tbi 
-            && params.giab_highconf_regions)
+            && params.giab_highconf_regions
+        )
 
     script:
     // bn = "{vcf.baseName}"
@@ -2399,7 +2765,7 @@ process BcftoolsStats {
 
     tag {"${variantCaller} - ${vcf}"}
 
-    publishDir "${params.outdir}/Reports/${idSample}/BCFToolsStats", mode: params.publish_dir_mode
+    publishDir "${params.outdir}/Reports/${idSample}/BCFToolsStats/${variantCaller}", mode: params.publish_dir_mode
 
     input:
         tuple variantCaller, idSample, file(vcf)
@@ -2422,7 +2788,7 @@ process Vcftools {
 
     tag {"${variantCaller} - ${vcf}"}
 
-    publishDir "${params.outdir}/Reports/${idSample}/VCFTools", mode: params.publish_dir_mode
+    publishDir "${params.outdir}/Reports/${idSample}/VCFTools/${variantCaller}", mode: params.publish_dir_mode
 
     input:
         tuple variantCaller, idSample, file(vcf)
@@ -2971,14 +3337,14 @@ process MultiQC {
         file (multiqcConfig) 
         file (versions) 
         // file ('bamQC/*') 
-        file ('BCFToolsStats/*') 
         file ('FastQC/*') 
+        file ('BCFToolsStats/*') 
+        file ('VCFTools/*')
         file ('MarkDuplicates/*') 
         file ('SamToolsStats/*') 
-        file ('snpEff/*') 
-        file ('VCFTools/*')
-        file ('CollectHsMetrics/*')
         file ('CollectAlignmentSummary/*')
+        file ('CollectHsMetrics/*')
+        // file ('snpEff/*') 
 
     output:
         set file("*multiqc_report.html"), file("*multiqc_data") 
@@ -3186,6 +3552,7 @@ def defineToolList() {
         'freebayes',
         'haplotypecaller',
         'deepvariant',
+        'benchmark_dv_and_hc_against_giab',
         'benchmark_dv_against_hc',
         'hap_py',
         'manta',
