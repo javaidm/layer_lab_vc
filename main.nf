@@ -806,9 +806,36 @@ workflow wf_gatk_somatic_cnv{
         CollectReadCounts(_md_bam,
                         PreprocessIntervals.out)
 
-        // CreateReadCountSomaticPON(
+        // Create pon if specified
+        (normal_read_counts, tumor_read_counts) = 
+        CollectReadCounts.out
+        .branch{
+             _: statusMap[it[0], it[1]] == 0
+            __: statusMap[it[0], it[1]] == 1
+        }
+        
+        // normal_read_counts = 
         // CollectReadCounts.out.collect()
-        // )
+        // .filter{
+        //      statusMap[it[0], it[1]] == 0
+        // }
+
+        normal_read_counts
+        .dump(tag: 'normal_read_counts: ')
+        
+        normal_read_counts_hdf5 = 
+                normal_read_counts
+                .map{idPatient, idSample, hdf5 -> 
+                    [hdf5]
+                }
+                .dump(tag: 'hdf5: ')
+        
+        tumor_read_counts
+        .dump(tag: 'tumor_read_counts: ')
+
+        CreateReadCountPon(
+            normal_read_counts_hdf5.collect()
+        )
         
         DenoiseReadCounts(
             CollectReadCounts.out.sample_read_counts,
@@ -1261,6 +1288,7 @@ def helpMessage() {
                                     Default: None
                                     Adds the following tools for --tools: DNAseq, DNAscope and TNscope
         --annotation_cache          Enable the use of cache for annotation, to be used with --snpEff_cache and/or --vep_cache
+        --create_read_count_pon     Read Count PON to be used with 'gatkcnv' for (somatic copy number variants). See https://tinyurl.com/ydcs6peu
         --pon                       panel-of-normals VCF (bgzipped, indexed). See: https://software.broadinstitute.org/gatk/documentation/tooldocs/current/org_broadinstitute_hellbender_tools_walkers_mutect_CreateSomaticPanelOfNormals.php
         --pon_index                 index of pon panel-of-normals VCF
 
@@ -3063,7 +3091,7 @@ process PreprocessIntervals {
         // file("preprocessed_intervals.interval_list"), emit: 'processed_intervals'
         file("preprocessed_intervals.interval_list")
 
-    when: 'gatkcnv' in tools
+    when: ('gatkcnv' in tools) || params.create_read_count_pon
     
     script:
     intervals_options = params.no_intervals ? "" : "-L ${intervalBed}"
@@ -3092,7 +3120,7 @@ process CollectReadCounts {
     output:
         tuple idPatient, idSample, file("${idSample}.counts.hdf5"), emit: 'sample_read_counts'
 
-    when: 'gatkcnv' in tools
+    when: ('gatkcnv' in tools) || params.create_read_count_pon
 
     script:
     """
@@ -3104,42 +3132,39 @@ process CollectReadCounts {
     """
 }
 
-// process CreateReadCountSomaticPON {
-//     echo true
-//     // tag "$sample"
+process CreateReadCountPon {
+    // echo true
+    tag "ReadCountPon"
     
-//     publishDir "${OUT_DIR}/misc/read_count_somatic_pon", mode: 'copy'
-    
-//     input:
-//     // file (read_count_hdf5s:'all_read_counts/*')
-//     file(read_count_hdf5s)
-    
-//     // file(this_read)
-
-//     output:
-//     file(out_file)
-
-//     script:
-//     // sample = this_read.simpleName
-//     out_file = "cnv.pon.hdf5"
-//     params_str = ''
-
-//     // Only get the normal samples
-//     read_count_hdf5s.each{
-//         sample = it.simpleName
-//         // check if this is one of the controls/parental samples
-//         if (LLabUtils.sampleInList(sample, list_of_controls)){
-//           params_str = "${params_str} -I ${it}"
-//         }
-//     }
+    publishDir "${params.outdir}/Preprocessing/ReadCountPon/", 
+    mode: params.publish_dir_mode
 
     
-//     """
-//     gatk CreateReadCountPanelOfNormals \
-//         $params_str \
-//         -O $out_file
-//     """
-// }
+    input:
+    file(read_count_hdf5s)
+    
+    // file(this_read)
+
+    output:
+    file(out_file)
+
+    script:
+    when: params.create_read_count_pon
+    // sample = this_read.simpleName
+    out_file = "read_count_pon.hdf5"
+    params_str = ''
+    // Only get the normal samples
+    read_count_hdf5s.each{
+        params_str = "${params_str} -I ${it}"
+    }
+
+    
+    """
+    gatk CreateReadCountPanelOfNormals \
+        $params_str \
+        -O $out_file
+    """
+}
 
 process DenoiseReadCounts {
     label 'cpus_32'
@@ -3389,6 +3414,7 @@ def printSummary(){
     // if ('strelka' in tools && 'manta' in tools )   summary['Strelka BP']        = params.noStrelkaBP ? 'No' : 'Yes'
     if (params.sequencing_center)                  summary['Sequenced by']      = params.sequencing_center
     if (params.pon && 'mutect2' in tools)          summary['Panel of normals']  = params.pon
+    // if (params.create_read_count_pon)          summary['Panel of normals']  = params.pon
 
     // summary['Save Genome Index'] = params.saveGenomeIndex ? 'Yes' : 'No'
     // summary['Nucleotides/s']     = params.nucleotidesPerSecond
