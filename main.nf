@@ -3264,6 +3264,46 @@ process CompressVCFvep {
 
 /*
 ================================================================================
+                                     Mutect2 
+================================================================================
+*/
+
+process Mutect2Single{
+     tag {idSampleTumor + "_vs_" + idSampleNormal + "-" + intervalBed.baseName}
+    label 'cpus_1'
+
+    input:
+        tuple idPatient, idSample,file(bam), file(bai), file(intervalBed)
+        file(dict)
+        file(fasta)
+        file(fastaFai)
+        file(germlineResource)
+        file(germlineResourceIndex)
+    output:
+        tuple idPatient,
+            val("${idSampleTumor}_vs_${idSampleNormal}"),
+            file("${intervalBed.baseName}_${idSample}.vcf")
+        tuple idPatient,
+            idSampleTumor,
+            idSampleNormal,
+            file("${intervalBed.baseName}_${idSample}.vcf.stats") optional true
+
+    when: 'mutect2_single' in tools
+
+    """
+    # Get raw calls
+    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+      Mutect2 \
+      -R ${fasta}\
+      -I ${bam}  -tumor ${idSample} \
+      -L ${intervalBed} \
+      --germline-resource ${germlineResource} \
+      -O ${intervalBed.baseName}_${idSample}.vcf
+    """
+}
+
+/*
+================================================================================
                                      Somatic CNV
 ================================================================================
 */
