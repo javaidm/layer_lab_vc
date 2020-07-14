@@ -190,7 +190,6 @@ form inside the build_indices workflow */
 ch_fasta_fai = ch_fasta_gz = ch_fasta_gzi = ch_fasta_gz_fai \
 = ch_bwa_index = ch_dict = ch_dbsnp_index = ch_germline_resource_index \
 =  ch_read_count_somatic_pon_index = Channel.empty()
-
 printSummary()
 
 workflow wf_get_software_versions{
@@ -293,24 +292,14 @@ workflow wf_partition_fastq{
         pair_reads = _pair_reads
 } // end of wf_partition_fastq
 
-workflow wf_map_reads{
+workflow wf_merge_mapped_reads{
     
     take:
-        take: _input_pair_reads
-        take: _fasta
-        take: _fasta_fai
-        take: _bwa_index
+        take: bam_mapped
     main:
-        
-        MapReads(_input_pair_reads, 
-                _fasta, 
-                _fasta_fai,
-                _bwa_index
-        ) 
-
         // STEP 1.5: MERGING BAM FROM MULTIPLE LANES
         (single_bams, multiple_bams) = 
-        MapReads.out.bam_mapped.groupTuple(by:[0, 1])
+        bam_mapped.groupTuple(by:[0, 1])
         .branch{
             _: it[2].size() == 1
             __: it[2].size() > 1
@@ -321,6 +310,13 @@ workflow wf_map_reads{
             idPatient, idSample, idRun, bam ->
             [idPatient, idSample, bam]
         }
+        
+        // tell the mergeBamMapped to generate the .bams
+        multiple_bams = 
+        multiple_bams.map{idPatient, idSample, idRun, bams -> 
+            [ idPatient, idSample, idRun, '.bam', bams ]
+        }
+
         MergeBamMapped(multiple_bams)
         
         merged_bams = Channel.empty()
@@ -344,6 +340,67 @@ workflow wf_map_reads{
         merged_bams = merged_bams
 } // end of wf_map_reads
 
+workflow wf_qc_filter_mapped_reads{
+    
+    take:
+       take: _bam_mapped
+    main:
+        // bam_mapped
+        // .dump('bam_mapped_input: ')
+        // Run the bam QC filtering
+        FilterBamRead1(_bam_mapped)
+        FilterBamRead2(_bam_mapped)
+        filtered_reads = FilterBamRead1.out.filtered_reads
+                        .mix(FilterBamRead2.out.filtered_reads)
+                        .groupTuple(by: [0,1,2])
+                        // .dump(tag: 'filtered_reads: ')
+        // Merge Reads1 and Reads2
+        MergeFilteredBamReads(filtered_reads)
+        // Here we filter out seconday and supplemntary reads
+        FilterOutSecondaryAndSupplementaryReads(
+            MergeFilteredBamReads.out.filtered_bam)
+        filtered_out_bams = FilterOutSecondaryAndSupplementaryReads
+                            .out.filtered_bam
+                            .groupTuple(by:[0, 1])
+                            // .dump(tag: 'qc_bams_for_merging')
+        
+        // tell the mergeBamMapped to generate the .bams
+        filtered_out_bams = 
+        filtered_out_bams.map{idPatient, idSample, idRun, bams -> 
+            [ idPatient, idSample, idRun, "_pq${params.bam_mapping_q}.bam", bams ]
+        }
+        .dump(tag: 'qc_bams_for_merging')
+        // STEP 1.5: MERGING BAM FROM MULTIPLE LANES
+        MergeBamMapped(filtered_out_bams)
+        // put the string qc_60 or whatever the quality is there in the filename
+        // bams_index = MergeBamMapped.out
+        //             .map{ idPatient, idSample, bam -> 
+        //                   bam_base_name = file(bam).baseName
+        //                   new_bam_name =  "${bam_base_name}_pq${params.bam_mapping_q}.bam"
+        //                   bam.renameTo(new_bam_name)
+        //                   [idPatient, idSample, bam]
+        //             }
+        //             .dump(tag: 'bams_index: ')
+
+        IndexBamFile(MergeBamMapped.out)
+        
+        // // Creating a TSV file to restart from this step
+        // merged_bams = 
+        // .map { idPatient, idSample, bamFile ->
+        //     status = statusMap[idPatient, idSample]
+        //     gender = genderMap[idPatient]
+        //     bam = "${params.outdir}/Bams/${idSample}/${idSample}.bam"
+        //     bai = "${params.outdir}/Bams/${idSample}/${idSample}.bai"
+        //     "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"
+        // }.collectFile(
+        //     name: 'mapped_bam_dummy.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
+        // )
+        
+        // exit 1, 'leaving early!'
+    emit:
+        merged_bams = IndexBamFile.out
+} // end of wf_map_reads
+
 workflow wf_mark_duplicates{
     take: _bams
     main:
@@ -352,6 +409,19 @@ workflow wf_mark_duplicates{
         dm_bams = MarkDuplicates.out.marked_bams
         dm_bam_stats = MarkDuplicates.out[1]
 }
+
+// workflow wf_filter_bams{
+//     take: _bams
+//     main:
+//         FilterBamRead1(_bams)
+//         FilterBamRead2(_bams)
+//         filtered_reads = Channel.empty()
+//             .mix(FilterBamRead1.out.filtered_reads,
+//                 FilterBamRead2.out.filtered_reads)
+//             .groupTuple(by:[0, 1])
+//             // .dump(tag: 'filtered_bams')
+//         MergeFilteredBamReads(filtered_reads)
+// }
 
 workflow wf_deepvariant{
     take: _dm_bams
@@ -1014,28 +1084,6 @@ workflow{
 
     wf_get_software_versions()
     wf_build_indexes()
-
-    // ch_fasta_fai = params.fasta_fai ? Channel.value(file(params.fasta_fai)) : wf_build_indices.out.fasta_fai
-    // // The following three mainly used by the DeepVariant
-    // ch_fasta_gz = params.fasta_gz ? Channel.value(file(params.fasta_gz)) : wf_build_indices.out.fasta_gz
-    // ch_fasta_gz_fai = params.fasta_gz_fai ? Channel.value(file(params.fasta_gz_fai)) : wf_build_indices.out.fasta_gz_fai
-    // ch_fasta_gzi = params.fasta_gzi ? Channel.value(file(params.fasta_gzi)) : wf_build_indices.out.fasta_gzi
-    // ch_bwa_index = params.bwa_index ? Channel.value(file(params.bwa_index)) : wf_build_indices.out.bwa_indexes
-    // ch_dict = params.dict ? Channel.value(file(params.dict)) : wf_build_indices.out.dict
-    
-    // ch_dbsnp_index = params.dbsnp ? \
-    //     params.dbsnp_index ? Channel.value(file(params.dbsnp_index)) : wf_build_indices.out.dbsnp_index \
-    //     : "null"
-    // ch_germline_resource_index = params.germline_resource ? \
-    //     params.germline_resource_index ? Channel.value(file(params.germline_resource_index)) \
-    //     : wf_build_indices.out.germline_resource_index : "null"
-    
-    // ch_known_indels_index = params.known_indels ? \
-    //     params.known_indels_index ? ch_known_indels_index : wf_build_indices.out.known_indels_index.collect() \
-    //     : "null"    
-    // ch_read_count_somatic_pon_index = params.read_count_somatic_pon_index ? Channel.value(file(params.read_count_somatic_pon_index)) \
-    // : wf_build_indices.out.pon_index
-    
     ch_fasta_fai =  wf_build_indexes.out.fasta_fai
     // The following three mainly used by the DeepVariant
     ch_fasta_gz =  wf_build_indexes.out.fasta_gz
@@ -1055,15 +1103,16 @@ workflow{
     ch_input_pair_reads = wf_partition_fastq.out.pair_reads
 
     FastQCFQ(ch_input_pair_reads)     
-    
-    wf_map_reads(
-            ch_input_pair_reads, 
+    MapReads(
+        ch_input_pair_reads, 
             ch_fasta,
             ch_fasta_fai,
             ch_bwa_index
     )
-    
-    ch_merged_bams = wf_map_reads.out.merged_bams
+    wf_merge_mapped_reads(MapReads.out.bam_mapped)
+    wf_qc_filter_mapped_reads(MapReads.out.bam_mapped)
+
+    ch_merged_bams = wf_merge_mapped_reads.out.merged_bams
     
     if (step == 'markdups'){
        ch_merged_bams = ch_input_sample	 
@@ -1071,7 +1120,13 @@ workflow{
 
    
     wf_mark_duplicates(ch_merged_bams)
-
+    // wf_mark_duplicates output
+    //tuple idPatient, idSample, file("md.bam"), file("md.bai")
+    
+    // Filter Bams based upong the bam_mapping_q, and params.filter_bams
+    // Rebecca's request
+    // wf_filter_bams(wf_mark_duplicates.out.dm_bams)
+    
     // Use Duplicated Marked Bams for DeepVariant
     wf_deepvariant(
                 wf_mark_duplicates.out.dm_bams,
@@ -1291,6 +1346,9 @@ def helpMessage() {
         --create_read_count_pon     Read Count PON to be used with 'gatkcnv' for (somatic copy number variants). See https://tinyurl.com/ydcs6peu
         --pon                       panel-of-normals VCF (bgzipped, indexed). See: https://software.broadinstitute.org/gatk/documentation/tooldocs/current/org_broadinstitute_hellbender_tools_walkers_mutect_CreateSomaticPanelOfNormals.php
         --pon_index                 index of pon panel-of-normals VCF
+        --filter_bams               Generate additional filter Bams based upon the bam_mapping_q parameter
+        --bam_mapping_q             Specify the lower threshold for mapping quality (defaults to 60). All reads below this threshold will be discarded
+                                    when generate the additional bams (you must specify the param --filter-bams)
 
     References                      If not specified in the configuration file or you wish to overwrite any of the references.
         --bwa_index                  bwa indexes
@@ -1758,6 +1816,133 @@ process MapReads {
         samtools sort --threads ${task.cpus} -m 2G - > ${idSample}_${idRun}.bam
     """
 }
+// STEP 1.4 FILTERING BAMS ON THE BASIS OF QUALITY SCORES AND UNIQUELY MAPPED READS. ORIGINAL COMMANDS CAME FROM REBECCA BERNARD
+
+process FilterBamRead1 {
+    label 'cpus_32'
+
+    tag {idPatient + "-" + idSample + "_" + idRun}
+
+    input:
+        tuple idPatient, idSample, idRun, file("${idSample}_${idRun}.bam")
+        
+    output:
+        tuple idPatient, idSample, idRun, file("${idSample}_${idRun}_filtered_r1.bam"), emit: filtered_reads
+
+    when: params.filter_bams
+    script:
+    """
+    sambamba view -t ${task.cpus} -h \
+        -F "(first_of_pair and mapping_quality >=${params.bam_mapping_q} \
+            and not ([XA] != null or [SA] != null)) \
+            or second_of_pair" \
+            "${idSample}_${idRun}.bam" \
+        | samtools sort -n --threads ${task.cpus} \
+        | samtools fixmate - - \
+        | samtools view -h -f0x02 > "${idSample}_${idRun}_filtered_r1.bam"
+    """
+}
+
+process FilterBamRead2 {
+    label 'cpus_32'
+
+    tag {idPatient + "-" + idSample + "_" + idRun}
+
+    input:
+        tuple idPatient, idSample, idRun, file("${idSample}_${idRun}.bam")
+        
+    output:
+        tuple idPatient, idSample, idRun, file("${idSample}_${idRun}_filtered_r2.bam"), emit: filtered_reads
+
+    when: params.filter_bams
+    script:
+    """
+    sambamba view -t ${task.cpus} -h \
+        -F "(second_of_pair and mapping_quality >=${params.bam_mapping_q} \
+            and not ([XA] != null or [SA] != null)) \
+            or first_of_pair" \
+            "${idSample}_${idRun}.bam" \
+        | samtools sort -n --threads ${task.cpus} \
+        | samtools fixmate - - \
+        | samtools view -h -f0x02 > "${idSample}_${idRun}_filtered_r2.bam"
+    """
+}
+
+process MergeFilteredBamReads {
+    label 'cpus_32'
+    tag {idPatient + "-" + idSample}
+
+    // publishDir "${params.outdir}/Bams/${idSample}", mode: params.publish_dir_mode
+
+    input:
+        tuple idPatient, idSample, idRun, file(partial_filtered_bams)
+
+    output:
+        tuple idPatient, idSample, idRun,  file(out_bam), file("${out_bam}.bai"), emit: filtered_bam
+
+    when: (params.filter_bams)
+
+    script:
+     out_bam = "${idSample}_${idRun}_filtered.bam"
+    // bn = file(out_bam).baseName
+    // out_bai = "${bn}.bai"
+    """
+    samtools merge --threads ${task.cpus} -n -c -p merged.bam ${partial_filtered_bams}
+    samtools sort --threads ${task.cpus} merged.bam -o ${idSample}_${idRun}_filtered.bam
+    #samtools index  --threads ${task.cpus} ${idSample}_${idRun}_filtered.bam
+    samtools index   ${idSample}_${idRun}_filtered.bam
+    # cleaning
+    rm -f merged.bam
+    """
+}
+
+process FilterOutSecondaryAndSupplementaryReads {
+    label 'cpus_32'
+    tag {idPatient + "-" + idSample}
+
+    // publishDir "${params.outdir}/Bams/${idSample}", mode: params.publish_dir_mode
+
+    input:
+        tuple idPatient, idSample, idRun,  file("${idSample}_${idRun}_filtered.bam"), file(bai)
+
+    output:
+        tuple idPatient, idSample, idRun, file(out_bam),  emit: filtered_bam
+
+    when: (params.filter_bams)
+
+    script:
+    out_bam = "${idSample}_${idRun}_pq${params.bam_mapping_q}.bam"
+    bn = file(out_bam).baseName
+    out_bai = "${bn}.bai"
+    """
+    #!/usr/bin/env python
+    import pysam
+    import shutil
+    import os
+    in_bam = "${idSample}_${idRun}_filtered.bam"
+    # pysam.index("--threads", ${task.cpus}, in_bam)
+    #pysam.index(in_bam)
+    
+    fd_in_bam = pysam.AlignmentFile(in_bam, "rb")
+    fd_out_bam = pysam.AlignmentFile("uniq.bam", "wb", template=fd_in_bam)
+    for r in fd_in_bam.fetch():
+        if r.is_proper_pair \
+           and not r.is_secondary \
+           and not r.is_supplementary:
+           fd_out_bam.write(r)
+                
+
+    fd_in_bam.close()
+    fd_out_bam.close()
+    # Sort the file by coordinates
+    pysam.sort("-o", "${out_bam}", "--threads", "${task.cpus}", "uniq.bam")
+    pysam.index("${out_bam}")
+    shutil.move("${out_bam}.bai", "${out_bai}")
+    # Cleanup
+    os.unlink("uniq.bam")
+    """
+}
+
 
 // STEP 1.5: MERGING BAM FROM MULTIPLE LANES
 process MergeBamMapped {
@@ -1766,14 +1951,17 @@ process MergeBamMapped {
     tag {idPatient + "-" + idSample}
 
     input:
-        tuple idPatient, idSample, idRun, file(bam)
+        tuple idPatient, idSample, idRun, out_suffix, file(bams)
+        // tuple idPatient, idSample, idRun, file(bam), val bam_type
 
     output:
-        tuple idPatient, idSample, file("${idSample}.bam")
+        tuple idPatient, idSample,  file("${idSample}${out_suffix}")
 
     script:
+    // suffix = bams.first().minus("${idSample}_${idRun}")
+    // out_file = "${idSample}${suffix}"
     """
-    samtools merge --threads ${task.cpus} ${idSample}.bam ${bam}
+    samtools merge --threads ${task.cpus} "${idSample}${out_suffix}" ${bams}
     """
 }
 
@@ -1885,7 +2073,7 @@ process BaseRecalibrator {
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.table")
         // set idPatient, idSample into recalTableTSVnoInt
 
-    // when: params.known_indels && ('haplotypecaller' in tools || 'mutect2' in tools)
+    when: params.known_indels && ('haplotypecaller' in tools || 'mutect2' in tools)
 
     script:
     dbsnpOptions = params.dbsnp ? "--known-sites ${dbsnp}" : ""
