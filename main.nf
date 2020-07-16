@@ -353,7 +353,7 @@ workflow wf_qc_filter_mapped_reads{
         filtered_reads = FilterBamRead1.out.filtered_reads
                         .mix(FilterBamRead2.out.filtered_reads)
                         .groupTuple(by: [0,1,2])
-                        // .dump(tag: 'filtered_reads: ')
+                        .dump(tag: 'filtered_reads_merge: ')
         // Merge Reads1 and Reads2
         MergeFilteredBamReads(filtered_reads)
         // Here we filter out seconday and supplemntary reads
@@ -1925,12 +1925,15 @@ process FilterOutSecondaryAndSupplementaryReads {
     
     fd_in_bam = pysam.AlignmentFile(in_bam, "rb")
     fd_out_bam = pysam.AlignmentFile("uniq.bam", "wb", template=fd_in_bam)
+    
+    # Store reads to the dictionary so only unique reads stay
+    reads_dict={}
     for r in fd_in_bam.fetch():
-        if r.is_proper_pair \
-           and not r.is_secondary \
-           and not r.is_supplementary:
-           fd_out_bam.write(r)
-                
+        reads_dict[(r.query_name, r.flag)] = r
+    
+    # iterate through the dict to write to the output bam file
+    for key, read in reads_dict.items():
+        fd_out_bam.write(read)
 
     fd_in_bam.close()
     fd_out_bam.close()
