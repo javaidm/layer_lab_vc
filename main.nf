@@ -146,8 +146,10 @@ ch_fasta = params.fasta && !('annotate' in step) ? Channel.value(file(params.fas
 // ch_intervals = params.intervals && !params.no_intervals && !('annotate' in step) ? Channel.value(file(params.intervals)) : "null"
 ch_germline_resource = params.germline_resource && 'mutect2' in tools ? Channel.value(file(params.germline_resource)) : "null"
 ch_intervals = params.intervals && !params.no_intervals && !('annotate' in step) ? Channel.value(file(params.intervals)) : "null"
-// ch_pon = params.pon ? Channel.value(file(params.pon)) : "null"
-ch_read_count_somatic_pon = params.read_count_somatic_pon ? Channel.value(file(params.read_count_somatic_pon)) : "null"
+
+ch_read_count_pon = params.read_count_pon ? Channel.value(file(params.read_count_pon)) : "null"
+ch_somatic_pon = params.somatic_pon ? Channel.value(file(params.somatic_pon)) : "null"
+ch_somatic_pon_index = params.somatic_pon_index ? Channel.value(file(params.somatic_pon_index)) : "null"
 ch_target_bed = params.target_bed ? Channel.value(file(params.target_bed)) : "null"
 ch_bait_bed = params.bait_bed ? Channel.value(file(params.bait_bed)) : "null"
 // knownIndels is currently a list of file for smallGRCh37, so transform it in a channel
@@ -189,7 +191,7 @@ ch_chco_highqual_snps = params.chco_highqual_snps ? Channel.value(file(params.ch
 form inside the build_indices workflow */
 ch_fasta_fai = ch_fasta_gz = ch_fasta_gzi = ch_fasta_gz_fai \
 = ch_bwa_index = ch_dict = ch_dbsnp_index = ch_germline_resource_index \
-=  ch_read_count_somatic_pon_index = Channel.empty()
+=  ch_read_count_pon = ch_somatic_pon = ch_somatic_pon_index =  Channel.empty()
 printSummary()
 
 workflow wf_get_software_versions{
@@ -211,7 +213,7 @@ workflow wf_build_indexes{
     BuildDbsnpIndex(ch_dbsnp)
     BuildGermlineResourceIndex(ch_germline_resource)
     BuildKnownIndelsIndex(ch_known_indels)
-    BuildPonIndex(ch_read_count_somatic_pon)
+    BuildSomaticPonIndex(ch_somatic_pon)
     fasta_fai = params.fasta_fai ? Channel.value(file(params.fasta_fai)) : BuildFastaFai.out
     fasta_gz = params.fasta_gz ? Channel.value(file(params.fasta_gz)) : BuildFastaGz.out
     fasta_gz_fai = params.fasta_gz_fai ? Channel.value(file(params.fasta_gz_fai)) : BuildFastaGzFai.out
@@ -232,9 +234,9 @@ workflow wf_build_indexes{
                             params.known_indels_index ? ch_known_indels_index : \
                             BuildKnownIndelsIndex.out.collect() \
                             : "null"    
-    read_count_somatic_pon_index = params.read_count_somatic_pon_index ? \
-                            Channel.value(file(params.read_count_somatic_pon_index)) \
-                            : BuildPonIndex.out
+    somatic_pon_index = params.somatic_pon_index ? \
+                            Channel.value(file(params.somatic_pon_index)) \
+                            : BuildSomaticPonIndex.out
     emit:
         fasta_fai = fasta_fai
         fasta_gz = fasta_gz
@@ -245,7 +247,7 @@ workflow wf_build_indexes{
         dbsnp_index = dbsnp_index
         germline_resource_index = germline_resource_index
         known_indels_index = known_indels_index
-        read_count_somatic_pon_index = read_count_somatic_pon_index
+        somatic_pon_index = somatic_pon_index
         
 } // end of wf_build_indices
 
@@ -733,6 +735,45 @@ workflow wf_genotype_gvcf{
     // cohort_vcf_without_index = CohortConcatVCF.out[1]
 } // end of wf_haplotypecaller
 
+workflow wf_mutect2_single{
+    take: _int_bam_recal
+    take: _fasta
+    take: _fasta_fai
+    take: _dict
+    take: _germline_resource
+    take: _germline_resource_index
+    take: _target_bed
+    main:
+        Mutect2Single(
+            _int_bam_recal,
+            _fasta,
+            _fasta_fai,
+            _dict,
+            _germline_resource,
+            _germline_resource_index
+        )
+        // group scattered vcf's (per interval) by the 
+        // idPatient, and idSample
+
+        _concat_vcf = Mutect2Single.out
+                      .groupTuple(by: [0, 1])
+                      
+        _concat_vcf = Channel.from('Mutect2_single')
+                      .combine(_concat_vcf)
+                      .dump(tag: 'vcf_concat_vcf')
+        ConcatVCF(
+            _concat_vcf,
+            _fasta_fai,
+            _target_bed,
+            'Mu2_single', // prefix for output files
+            'vcf', // extension for the output files
+            'Mutect2_single_mode' // output directory name
+            )
+    emit:
+        vcf = ConcatVCF.out.concatenated_vcf_with_index
+        vcf_without_index = ConcatVCF.concatenated_vcf_without_index
+} // end of wf_mutect2_single
+
 workflow wf_hap_py{
     take: deepvariant_vcfs
     take: haplotypecaller_vcfs
@@ -1157,6 +1198,30 @@ workflow{
             ch_known_indels,
             ch_known_indels_index
     )
+    // Handle the Mutect2 related workflows
+
+    // separate BAM by status
+    // bamNormal = Channel.empty()
+    // bamTumor = Channel.empty ()
+    (bam_normal, bam_tumor) = 
+        wf_recal_bams.out.bam_recal.branch{
+            _:  statusMap[it[0], it[1]] == 0
+            __: statusMap[it[0], it[1]] == 1
+        }
+    bam_normal.dump('bam_normal: ')
+    bam_tumor.dump('bam_tumor: ')
+
+    // Crossing Normal and Tumor to get a T/N pair for Somatic Variant Calling
+    // Remapping channel to remove common key idPatient
+    pair_bam = bam_normal.cross(bam_tumor).map {
+        normal, tumor ->
+        [normal[0], normal[1], normal[2], normal[3], tumor[1], tumor[2], tumor[3]]
+    }
+
+    pair_bam.dump(tag:'BAM Somatic Pair')
+
+    // ch_int_bam_recal = wf_recal_bams.out.bam_recal
+    //                     .combine(ch_bed_intervals)
 
     // bam_recal = wf_recal_bams.out.bam_recal
     wf_qc_recal_bams(
@@ -1328,8 +1393,9 @@ def helpMessage() {
                                     Available: Mapping, Recalibrate, VariantCalling, Annotate
                                     Default: Mapping
         --tools                     Specify tools to use for variant calling:
-                                    Available: ASCAT, ControlFREEC, FreeBayes, HaplotypeCaller, DeepVariant
-                                    Manta, mpileup, Mutect2, Strelka, TIDDIT
+                                    Available: ASCAT, ControlFREEC, FreeBayes, HaplotypeCaller, DeepVariant, 
+                                    Manta, mpileup, Mutect2, Mutect2_Single, gen_somatic_pon, gen_read_count_pon, 
+                                    Strelka, TIDDIT
                                     and/or for annotation:
                                     snpEff, VEP, merge
                                     and for pipline validation (if you have added GIAB samples):
@@ -1338,14 +1404,14 @@ def helpMessage() {
         --skip_qc                   Specify which QC tools to skip when running the pipeline
                                     Available: all, bamQC, BCFtools, FastQC, MultiQC, samtools, vcftools, versions
                                     Default: None
-        --annotate_tools             Specify from which tools the pipeline will look for VCF files to annotate, only for step annotate
+        --annotate_tools            Specify from which tools the pipeline will look for VCF files to annotate, only for step annotate
                                     Available: HaplotypeCaller, Manta, Mutect2, Strelka, TIDDIT
                                     Default: None
                                     Adds the following tools for --tools: DNAseq, DNAscope and TNscope
-        --annotation_cache          Enable the use of cache for annotation, to be used with --snpEff_cache and/or --vep_cache
-        --create_read_count_pon     Read Count PON to be used with 'gatkcnv' for (somatic copy number variants). See https://tinyurl.com/ydcs6peu
-        --pon                       panel-of-normals VCF (bgzipped, indexed). See: https://software.broadinstitute.org/gatk/documentation/tooldocs/current/org_broadinstitute_hellbender_tools_walkers_mutect_CreateSomaticPanelOfNormals.php
-        --pon_index                 index of pon panel-of-normals VCF
+        --annotation_cache          Enable the use of cache for annotation, to be used with --snpEff_cache and/or --vep_cache        
+        --somatic_pon               panel-of-normals VCF (bgzipped, indexed). See: https://software.broadinstitute.org/gatk/documentation/tooldocs/current/org_broadinstitute_hellbender_tools_walkers_mutect_CreateSomaticPanelOfNormals.php
+        --somatic_pon_index         index of pon panel-of-normals VCF
+        --read_count_pon            panel-of-normals hdf5 file. See https://gatk.broadinstitute.org/hc/en-us/articles/360040510031-CreateReadCountPanelOfNormals
         --filter_bams               Generate additional filter Bams based upon the bam_mapping_q parameter
         --bam_mapping_q             Specify the lower threshold for mapping quality (defaults to 60). All reads below this threshold will be discarded
                                     when generate the additional bams (you must specify the param --filter-bams)
@@ -1622,7 +1688,7 @@ process BuildKnownIndelsIndex {
 }
 
 
-process BuildPonIndex {
+process BuildSomaticPonIndex {
     tag {pon}
 
     publishDir params.outdir, mode: params.publish_dir_mode,
@@ -1634,7 +1700,7 @@ process BuildPonIndex {
     output:
         file("${pon}.tbi")
 
-    when: !(params.pon_index) && params.pon && ('tnscope' in tools || 'mutect2' in tools)
+    when: !(params.somatic_pon_index) && params.somatic_pon && ('tnscope' in tools || 'mutect2' in tools)
 
     script:
     """
@@ -2541,7 +2607,11 @@ process ConcatVCF {
         tuple variantCaller, idPatient, idSample, file("${outFile}.gz"), file("${outFile}.gz.tbi"), emit: concatenated_vcf_with_index
         tuple variantCaller, idPatient, idSample, file("${outFile}.gz"), emit: concatenated_vcf_without_index
 
-    when: ('haplotypecaller' in tools || 'mutect2' in tools || 'freebayes' in tools)
+    // when: ('haplotypecaller' in tools || \
+    //         'mutect2' in tools || \
+    //         'mutect2_single' in tools || \
+    //         'freebayes' in tools
+    //         )
 
     script:
     outFile =  "${output_file_prefix}_${idSample}.${output_file_ext}"
@@ -3264,43 +3334,78 @@ process CompressVCFvep {
 
 /*
 ================================================================================
-                                     Mutect2 
+                                     Mutect2Single (Single Sample Mode)
 ================================================================================
 */
 
 process Mutect2Single{
-     tag {idSampleTumor + "_vs_" + idSampleNormal + "-" + intervalBed.baseName}
-    label 'cpus_1'
+    tag {idSample + "-" + intervalBed.baseName}
+    label 'cpus_16'
 
     input:
-        tuple idPatient, idSample,file(bam), file(bai), file(intervalBed)
-        file(dict)
+        tuple idPatient, idSample, file(bam), file(bai), file(intervalBed)
         file(fasta)
         file(fastaFai)
+        file(dict)
         file(germlineResource)
         file(germlineResourceIndex)
+
     output:
-        tuple idPatient,
-            val("${idSampleTumor}_vs_${idSampleNormal}"),
-            file("${intervalBed.baseName}_${idSample}.vcf")
-        tuple idPatient,
-            idSampleTumor,
-            idSampleNormal,
-            file("${intervalBed.baseName}_${idSample}.vcf.stats") optional true
+        tuple idPatient, idSample, file(out_vcf)
 
-    when: 'mutect2_single' in tools
-
+    script:
+    out_vcf = "${intervalBed.baseName}_${idSample}.vcf"
     """
     # Get raw calls
     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
       Mutect2 \
-      -R ${fasta}\
-      -I ${bam}  -tumor ${idSample} \
+      -R ${fasta} \
+      -I ${bam}  \
       -L ${intervalBed} \
       --germline-resource ${germlineResource} \
-      -O ${intervalBed.baseName}_${idSample}.vcf
+      -O ${out_vcf}
     """
 }
+
+/*
+================================================================================
+                                     Mutect2 
+================================================================================
+*/
+
+// process Mutect2{
+//     tag {idSample + "-" + intervalBed.baseName}
+//     label 'cpus_16'
+
+//     input:
+//         tuple idPatient, idSample,file(bam), file(bai), file(intervalBed)
+//         file(dict)
+//         file(fasta)
+//         file(fastaFai)
+//         file(germlineResource)
+//         file(germlineResourceIndex)
+//     output:
+//         tuple idPatient,
+//             val("${idSampleTumor}_vs_${idSampleNormal}"),
+//             file("${intervalBed.baseName}_${idSample}.vcf")
+//         // tuple idPatient,
+//         //     idSampleTumor,
+//         //     idSampleNormal,
+//         //     file("${intervalBed.baseName}_${idSample}.vcf.stats") optional true
+
+//     // when: 'mutect2_single' in tools
+
+//     """
+//     # Get raw calls
+//     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+//       Mutect2 \
+//       -R ${fasta} \
+//       -I ${bam}  \
+//       -L ${intervalBed} \
+//       --germline-resource ${germlineResource} \
+//       -O ${intervalBed.baseName}_${idSample}.vcf
+//     """
+// }
 
 /*
 ================================================================================
@@ -3322,7 +3427,7 @@ process PreprocessIntervals {
         // file("preprocessed_intervals.interval_list"), emit: 'processed_intervals'
         file("preprocessed_intervals.interval_list")
 
-    when: ('gatkcnv' in tools) || params.create_read_count_pon
+    when: ('gatkcnv' in tools) || (params.create_read_count_pon in tools)
     
     script:
     intervals_options = params.no_intervals ? "" : "-L ${intervalBed}"
@@ -3351,7 +3456,7 @@ process CollectReadCounts {
     output:
         tuple idPatient, idSample, file("${idSample}.counts.hdf5"), emit: 'sample_read_counts'
 
-    when: ('gatkcnv' in tools) || params.create_read_count_pon
+    when: ('gatkcnv' in tools) || (params.create_read_count_pon in tools)
 
     script:
     """
@@ -3380,7 +3485,7 @@ process CreateReadCountPon {
     file(out_file)
 
     script:
-    when: params.create_read_count_pon
+    when: params.create_read_count_pon in tools
     // sample = this_read.simpleName
     out_file = "read_count_pon.hdf5"
     params_str = ''
@@ -3818,6 +3923,9 @@ def defineToolList() {
         'gatkcnv',
         'savvycnv',
         'mutect2',
+        'mutect2_single',
+        'gen_somatic_pon',
+        'gen_read_count_pon',
         'snpeff',
         'strelka',
         'tiddit',
