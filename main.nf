@@ -118,7 +118,7 @@ params.dbsnp = params.genome && \
 
 params.dbsnp_index = params.genome && params.dbsnp ? params.genomes[params.genome].dbsnp_index ?: null : null
 params.dict = params.genome && params.fasta ? params.genomes[params.genome].dict ?: null : null
-params.germline_resource = params.genome && 'mutect2' in tools ? params.genomes[params.genome].germline_resource ?: null : null
+params.germline_resource = params.genome ? params.genomes[params.genome].germline_resource ?: null : null
 params.germline_resource_index = params.genome && params.germline_resource ? params.genomes[params.genome].germline_resource_index ?: null : null
 params.intervals = params.genome && !('annotate' in step) ? params.genomes[params.genome].intervals ?: null : null
 params.known_indels = params.genome && ( 'mapping' in step || 'markdups' in step ) \
@@ -144,7 +144,10 @@ ch_fasta = params.fasta && !('annotate' in step) ? Channel.value(file(params.fas
 // ch_fasta_fai = params.fasta_fai && !('annotate' in step) ? Channel.value(file(params.fasta_fai)) : "null"
 // ch_germline_resource = params.germline_resource && 'mutect2' in tools ? Channel.value(file(params.germline_resource)) : "null"
 // ch_intervals = params.intervals && !params.no_intervals && !('annotate' in step) ? Channel.value(file(params.intervals)) : "null"
-ch_germline_resource = params.germline_resource && 'mutect2' in tools ? Channel.value(file(params.germline_resource)) : "null"
+ch_germline_resource = params.germline_resource &&
+                      ('mutect2' in tools || 'mutect2_single' in tools || 'gen_somatic_pon' in tools ) 
+                      ? Channel.value(file(params.germline_resource)) : "null"
+// if (ch_germline_resource == 'null') error "ch_germline_resource is empty!${params.germline_resource}"
 ch_intervals = params.intervals && !params.no_intervals && !('annotate' in step) ? Channel.value(file(params.intervals)) : "null"
 
 ch_read_count_pon = params.read_count_pon ? Channel.value(file(params.read_count_pon)) : "null"
@@ -760,7 +763,7 @@ workflow wf_mutect2_single{
                       
         _concat_vcf = Channel.from('Mutect2_single')
                       .combine(_concat_vcf)
-                      .dump(tag: 'vcf_concat_vcf')
+                    //   .dump(tag: 'vcf_concat_vcf')
         ConcatVCF(
             _concat_vcf,
             _fasta_fai,
@@ -771,7 +774,7 @@ workflow wf_mutect2_single{
             )
     emit:
         vcf = ConcatVCF.out.concatenated_vcf_with_index
-        vcf_without_index = ConcatVCF.concatenated_vcf_without_index
+        vcf_without_index = ConcatVCF.out.concatenated_vcf_without_index
 } // end of wf_mutect2_single
 
 workflow wf_hap_py{
@@ -1135,11 +1138,12 @@ workflow{
     ch_dbsnp_index = wf_build_indexes.out.dbsnp_index
     ch_germline_resource_index = wf_build_indexes.out.germline_resource_index
     ch_known_indels_index = wf_build_indexes.out.known_indels_index.collect()
-    ch_read_count_somatic_pon_index = wf_build_indexes.out.read_count_somatic_pon_index
+    ch_somatic_pon_index = wf_build_indexes.out.somatic_pon_index
     
     wf_build_intervals(ch_fasta_fai)
     ch_bed_intervals = wf_build_intervals.out.bed_intervals
-    if (params.no_intervals && step != 'annotate') ch_bed_intervals = Channel.from(file("no_intervals.bed"))
+    if (params.no_intervals && step != 'annotate') 
+        ch_bed_intervals = Channel.from(file("no_intervals.bed"))
     wf_partition_fastq()
     ch_input_pair_reads = wf_partition_fastq.out.pair_reads
 
@@ -1198,6 +1202,11 @@ workflow{
             ch_known_indels,
             ch_known_indels_index
     )
+    // ch_int_bam_recal carries a cross product of recalibrated bams and the interval files
+    ch_int_bam_recal = wf_recal_bams.out.bam_recal
+                    .combine(ch_bed_intervals)
+   
+
     // Handle the Mutect2 related workflows
 
     // separate BAM by status
@@ -1208,8 +1217,8 @@ workflow{
             _:  statusMap[it[0], it[1]] == 0
             __: statusMap[it[0], it[1]] == 1
         }
-    bam_normal.dump('bam_normal: ')
-    bam_tumor.dump('bam_tumor: ')
+    bam_normal.dump(tag: 'bam_normal: ')
+    bam_tumor.dump(tag: 'bam_tumor: ')
 
     // Crossing Normal and Tumor to get a T/N pair for Somatic Variant Calling
     // Remapping channel to remove common key idPatient
@@ -1219,11 +1228,20 @@ workflow{
     }
 
     pair_bam.dump(tag:'BAM Somatic Pair')
-
-    // ch_int_bam_recal = wf_recal_bams.out.bam_recal
-    //                     .combine(ch_bed_intervals)
+    ch_germline_resource_index.dump(tag: 'gl_resource_index')
+    // ch_int_bam_recal carries a cross product of recalibrated bams and the interval files
+    wf_mutect2_single(
+        ch_int_bam_recal,
+        ch_fasta,
+        ch_fasta_fai,
+        ch_dict,
+        ch_germline_resource,
+        ch_germline_resource_index,
+        ch_target_bed
+    )
 
     // bam_recal = wf_recal_bams.out.bam_recal
+
     wf_qc_recal_bams(
             wf_recal_bams.out.bam_recal_qc,
             ch_target_bed,
@@ -1235,9 +1253,7 @@ workflow{
 
     // bam_HaplotypeCaller => [idPatient, idSample, recalibrated bam, bam.bai, single interval to operate on]
     
-    ch_int_bam_recal = wf_recal_bams.out.bam_recal
-                        .combine(ch_bed_intervals)
-   
+  
     wf_haplotypecaller(
         ch_int_bam_recal,
         ch_fasta,
@@ -1285,7 +1301,7 @@ workflow{
         ch_fasta,
         ch_fasta_fai,         
         ch_dict,
-        ch_read_count_somatic_pon
+        ch_read_count_pon
     )
 
     wf_savvy_somatic_cnv(wf_mark_duplicates.out.dm_bams)
@@ -2142,7 +2158,11 @@ process BaseRecalibrator {
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.table")
         // set idPatient, idSample into recalTableTSVnoInt
 
-    when: params.known_indels && ('haplotypecaller' in tools || 'mutect2' in tools)
+    when: params.known_indels && 
+        ('haplotypecaller' in tools || 
+        'mutect2' in tools ||
+        'mutect2_single' in tools ||
+        'gen_somatic_pon' in tools)
 
     script:
     dbsnpOptions = params.dbsnp ? "--known-sites ${dbsnp}" : ""
@@ -2182,7 +2202,11 @@ process GatherBQSRReports {
         tuple idPatient, idSample, file("${idSample}.recal.table"), emit: recal_table
         // set idPatient, idSample into recalTableTSV
 
-    when: params.known_indels && ('haplotypecaller' in tools || 'mutect2' in tools)
+    when: params.known_indels &&
+        ('haplotypecaller' in tools || 
+            'mutect2' in tools ||
+            'mutect2_single' in tools ||
+            'gen_somatic_pon' in tools)
 
     script:
     input = recal.collect{"-I ${it}"}.join(' ')
@@ -2213,7 +2237,12 @@ process ApplyBQSR {
     output:
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.bam")
 
-    when: params.known_indels && ('haplotypecaller' in tools || 'mutect2' in tools)
+    when: params.known_indels &&
+        ('haplotypecaller' in tools || 
+        'mutect2' in tools ||
+        'mutect2_single' in tools ||
+        'gen_somatic_pon' in tools)
+
     script:
     prefix = params.no_intervals ? "" : "${intervalBed.baseName}_"
     intervalsOptions = params.no_intervals ? "" : "-L ${intervalBed}"
@@ -3427,7 +3456,7 @@ process PreprocessIntervals {
         // file("preprocessed_intervals.interval_list"), emit: 'processed_intervals'
         file("preprocessed_intervals.interval_list")
 
-    when: ('gatkcnv' in tools) || (params.create_read_count_pon in tools)
+    when: ('gatkcnv' in tools) || ('gen_read_count_pon' in tools)
     
     script:
     intervals_options = params.no_intervals ? "" : "-L ${intervalBed}"
@@ -3456,7 +3485,7 @@ process CollectReadCounts {
     output:
         tuple idPatient, idSample, file("${idSample}.counts.hdf5"), emit: 'sample_read_counts'
 
-    when: ('gatkcnv' in tools) || (params.create_read_count_pon in tools)
+    when: ('gatkcnv' in tools) || ('gen_read_count_pon' in tools)
 
     script:
     """
@@ -3485,7 +3514,7 @@ process CreateReadCountPon {
     file(out_file)
 
     script:
-    when: params.create_read_count_pon in tools
+    when:'gen_read_count_pon' in tools
     // sample = this_read.simpleName
     out_file = "read_count_pon.hdf5"
     params_str = ''
@@ -3520,7 +3549,7 @@ process DenoiseReadCounts {
     script:
     std_copy_ratio = "${idSample}.standardizedCR.tsv"
     denoised_copy_ratio = "${idSample}.denoisedCR.tsv"
-    pon_option = params.read_count_somatic_pon ? "--count-panel-of-normals ${read_count_somatic_pon}" : ""
+    pon_option = params.read_count_pon ? "--count-panel-of-normals ${read_count_somatic_pon}" : ""
     """
     
     gatk DenoiseReadCounts \
