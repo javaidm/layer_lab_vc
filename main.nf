@@ -777,6 +777,36 @@ workflow wf_mutect2_single{
         vcf_without_index = ConcatVCF.out.concatenated_vcf_without_index
 } // end of wf_mutect2_single
 
+workflow wf_somatic_pon{
+    take:  _vcfs_normal
+    take: _fasta
+    take: _fasta_fai
+    take: _dict
+    take: _germline_resource
+    take: _germline_resource_index
+    take: _target_bed
+
+    main:
+        SomaticPonGenomicsDBImport(
+            _vcfs_normal,
+            _target_bed
+        )
+
+        CreateSomaticPON(
+            SomaticPonGenomicsDBImport.out,
+            _fasta,
+            _fasta_fai,
+            _dict,
+            _germline_resource,
+            _germline_resource_index
+            )
+    emit:
+        
+        somatic_pon_gdb = SomaticPonGenomicsDBImport.out
+        somatic_pon = CreateSomaticPON.out
+        
+} // end of wf_somatic_pon
+
 workflow wf_hap_py{
     take: deepvariant_vcfs
     take: haplotypecaller_vcfs
@@ -1226,12 +1256,18 @@ workflow{
         normal, tumor ->
         [normal[0], normal[1], normal[2], normal[3], tumor[1], tumor[2], tumor[3]]
     }
-
-    pair_bam.dump(tag:'BAM Somatic Pair')
-    ch_germline_resource_index.dump(tag: 'gl_resource_index')
-    // ch_int_bam_recal carries a cross product of recalibrated bams and the interval files
+    // We need to prepare samples going to the mutect2 single sample mode.
+    // This depends upon what is included in the params.tools. Is it just the mutect2_single
+    // or gen_somatic_pon or both
+    ch_int_mutec2_single_bams = Channel.empty()
+    if ('mutect2_single' in tools ) // use all bams (normal plus tumor)
+        ch_int_mutec2_single_bams = wf_recal_bams.out.bam_recal.combine(ch_bed_intervals)
+    else if ('gen_somatic_pon' in tools && !('mutect2_single' in tools)) // use normal only
+        ch_int_mutec2_single_bams = bam_normal.combine(ch_bed_intervals)
+    // ch_int_mutec2_single_bams.dump(tag: 'ch_int_mutec2_single_bams: ')
+    
     wf_mutect2_single(
-        ch_int_bam_recal,
+        ch_int_mutec2_single_bams,
         ch_fasta,
         ch_fasta_fai,
         ch_dict,
@@ -1239,6 +1275,36 @@ workflow{
         ch_germline_resource_index,
         ch_target_bed
     )
+    // For somatic pon, only filter the mutect2 single vcf's for normal samples
+    // wf_mutect_single output tuple is:
+    //tuple variantCaller, idPatient, idSample, file(vcf.gz), file(vcf.gz.tbi)
+    // so we filter on the second and third element and check against the statusMap
+    somatic_pon_vcf = wf_mutect2_single.out.vcf
+                    .filter{
+                            statusMap[it[1], it[2]] == 0
+                        }
+                    .collect()
+                    .dump(tag: "somatic_pon_vcf")
+
+    // CreateSomaticPON(
+    //         somatic_pon_vcf,
+    //         ch_fasta,
+    //         ch_fasta_fai,
+    //         ch_dict,
+    //         ch_germline_resource,
+    //         ch_germline_resource_index
+    // )
+
+    wf_somatic_pon(
+            somatic_pon_vcf,
+            ch_fasta,
+            ch_fasta_fai,
+            ch_dict,
+            ch_germline_resource,
+            ch_germline_resource_index,
+            ch_target_bed
+    )
+    // Generating the somatic panel of normals
 
     // bam_recal = wf_recal_bams.out.bam_recal
 
@@ -3385,16 +3451,127 @@ process Mutect2Single{
     script:
     out_vcf = "${intervalBed.baseName}_${idSample}.vcf"
     """
-    # Get raw calls
+    # max-mnp-distance is set to 0 to avoid a bug in next process GenomicsDbImport
+    # See https://gatk.broadinstitute.org/hc/en-us/articles/360046224491-CreateSomaticPanelOfNormals-BETA-
+    
     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
       Mutect2 \
       -R ${fasta} \
       -I ${bam}  \
+      -max-mnp-distance 0 \
       -L ${intervalBed} \
       --germline-resource ${germlineResource} \
       -O ${out_vcf}
     """
 }
+
+// STEP GATK GenomicsDBImport
+process SomaticPonGenomicsDBImport {
+    label 'cpus_32'
+
+    publishDir "${params.outdir}/Preprocessing/Somatic_pon_db", mode: params.publish_dir_mode
+
+    input:
+    file("vcfs/*")
+    file(targetBED)
+
+    output:
+    file("somatic_pon.gdb")
+
+    when: 'gen_somatic_pon' in tools
+
+    script:
+    sample_map="cohort_samples.map"
+    
+    // gDB = chr
+    """
+    vcfs=' '
+    for x in `ls vcfs/*.vcf.gz`
+    do
+        base_name=`basename \${x}`
+        without_ext=\${base_name%.vcf.gz}
+        sample_name=\${without_ext##*_}
+        echo "\${sample_name}\t\$x" >> $sample_map 
+    done
+
+    gatk --java-options -Xmx${task.memory.toGiga()}g \
+    GenomicsDBImport  \
+    --genomicsdb-workspace-path somatic_pon.gdb \
+    -L ${targetBED} \
+    --sample-name-map $sample_map \
+    --merge-input-intervals \
+    --reader-threads ${task.cpus}
+    """
+}
+
+process CreateSomaticPON{
+    label 'cpus_max'
+    // label 'memory_max'
+     publishDir "${params.outdir}/Preprocessing/Somatic_pon", mode: params.publish_dir_mode
+
+    input:
+    file(pon) 
+    file(fasta)
+    file(fastaFai)
+    file(dict)
+    file(germlineResource)
+    file(germlineResourceIndex)
+    
+    output:
+    file(out_file)
+
+    when: 'gen_somatic_pon' in tools
+
+    script:
+    args_file = "normals_for_pon_vcf.args"
+    out_file = "somatic_pon.vcf.gz" 
+    pon_db = "gendb://${pon}"
+    
+    """
+     gatk --java-options -Xmx${task.memory.toGiga()}g \
+     CreateSomaticPanelOfNormals -R ${fasta} \
+     --germline-resource ${germlineResource} \
+    -V ${pon_db} \
+    -O ${out_file}
+    """
+}
+// process CreateSomaticPON{
+//     label 'cpus_max'
+//     // label 'memory_max'
+//      publishDir "${params.outdir}/Preprocessing/Somatic_pon", mode: params.publish_dir_mode
+
+//     input:
+//     file("vcfs/*") 
+//     file(fasta)
+//     file(fastaFai)
+//     file(dict)
+//     file(germlineResource)
+//     file(germlineResourceIndex)
+    
+//     output:
+//     file(out_file)
+
+//     when: 'gen_somatic_pon' in tools
+
+//     script:
+//     args_file = "normals_for_pon_vcf.args"
+//     out_file = "somatic_pon.vcf.gz" 
+//     // gen_pon_db = "gendb://${pon}"
+    
+//     """
+//     # first create the args file from all the normal vcfs
+//     for vcf in `ls vcfs/*.vcf.gz`
+//     do
+//         echo \${vcf} >> ${args_file} 
+//     done
+    
+//     gatk --java-options -Xmx${task.memory.toGiga()}g \
+//         CreateSomaticPanelOfNormals -R ${fasta} \
+//             --germline-resource ${germlineResource} \
+//             --variant ${args_file} \
+//             -O ${out_file}
+//     """
+// }
 
 /*
 ================================================================================
