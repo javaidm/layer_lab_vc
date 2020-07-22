@@ -194,7 +194,7 @@ ch_chco_highqual_snps = params.chco_highqual_snps ? Channel.value(file(params.ch
 form inside the build_indices workflow */
 ch_fasta_fai = ch_fasta_gz = ch_fasta_gzi = ch_fasta_gz_fai \
 = ch_bwa_index = ch_dict = ch_dbsnp_index = ch_germline_resource_index \
-=  ch_read_count_pon = ch_somatic_pon = ch_somatic_pon_index =  Channel.empty()
+=  ch_somatic_pon_index =  Channel.empty()
 printSummary()
 
 workflow wf_get_software_versions{
@@ -339,10 +339,22 @@ workflow wf_merge_mapped_reads{
         }.collectFile(
             name: 'mapped_bam.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
         )
-        
+        // if params.filter_bams is present, generate the relevant bam as well
+        if (params.filter_bams){
+            merged_bams
+            .map { idPatient, idSample, bamFile ->
+                status = statusMap[idPatient, idSample]
+                gender = genderMap[idPatient]
+                bam = "${params.outdir}/Bams/${idSample}/${idSample}_pq${params.bam_mapping_q}.bam"
+                bai = "${params.outdir}/Bams/${idSample}/${idSample}_pq${params.bam_mapping_q}.bai"
+                "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"
+            }.collectFile(
+                name: "mapped_bam_${params.bam_mapping_q}.tsv", sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
+            )   
+        }
         // exit 1, 'leaving early!'
     emit:
-        merged_bams = merged_bams
+        merged_bams = IndexBamFile.out
 } // end of wf_map_reads
 
 workflow wf_qc_filter_mapped_reads{
@@ -1190,7 +1202,7 @@ workflow{
     ch_merged_bams = wf_merge_mapped_reads.out.merged_bams
     
     if (step == 'markdups'){
-       ch_merged_bams = ch_input_sample	 
+       ch_merged_bams = ch_input_sample
     }
 
    
@@ -2125,7 +2137,7 @@ process IndexBamFile {
         tuple idPatient, idSample, file(bam)
 
     output:
-        tuple idPatient, idSample, file(bam), file("*.bai")
+        tuple idPatient, idSample, file(bam), file("${bam.baseName}.bai")
 
     // when: !params.knownIndels
 
@@ -2173,8 +2185,8 @@ process MarkDuplicates {
         }
 
     input:
-        // tuple idPatient, idSample, file("${idSample}.bam"), file("${idSample}.bai")
-        tuple idPatient, idSample, file("${idSample}.bam")
+        tuple idPatient, idSample, file("${idSample}.bam"), file("${idSample}.bai")
+        // tuple idPatient, idSample, file("${idSample}.bam")
 
     output:
         tuple idPatient, idSample, file("${idSample}.md.bam"), file("${idSample}.md.bai"), emit: marked_bams
@@ -2450,10 +2462,10 @@ process CollectAlignmentSummaryMetrics{
     
     script:
     """
-    gatk --java-options -Xmx32G CollectAlignmentSummaryMetrics --VALIDATION_STRINGENCY=LENIENT \
-    -I=$bam \
-    -O=${bam.baseName}_alignment_metrics.txt \
-    -R=$fasta
+    gatk --java-options -Xmx32G CollectAlignmentSummaryMetrics --VALIDATION_STRINGENCY LENIENT \
+    -I ${bam} \
+    -O ${bam.baseName}_alignment_metrics.txt \
+    -R ${fasta}
     """
 }
 
@@ -2478,15 +2490,15 @@ process CollectHsMetrics{
     when: !('hs_metrics' in skipQC) && params.bait_bed
     script:
     """
-    gatk BedToIntervalList -I=$targetBED -O=target.interval_list -SD=$dict
-    gatk BedToIntervalList -I=$baitBED -O=bait.interval_list -SD=$dict
+    gatk BedToIntervalList -I ${targetBED} -O target.interval_list -SD ${dict}
+    gatk BedToIntervalList -I ${baitBED} -O bait.interval_list -SD ${dict}
 
-    gatk --java-options -Xmx32G CollectHsMetrics --VALIDATION_STRINGENCY=LENIENT \
-    -I=$bam \
-    -O=${bam.baseName}_hs_metrics.txt \
-    -TI=target.interval_list \
-    -BI=bait.interval_list \
-    -R=$fasta
+    gatk --java-options -Xmx32G CollectHsMetrics --VALIDATION_STRINGENCY LENIENT \
+    -I ${bam} \
+    -O ${bam.baseName}_hs_metrics.txt \
+    -TI target.interval_list \
+    -BI bait.interval_list \
+    -R ${fasta}
     """
 }
 
@@ -3152,7 +3164,8 @@ process BcftoolsStats {
     publishDir "${params.outdir}/Reports/${idSample}/BCFToolsStats/${variantCaller}", mode: params.publish_dir_mode
 
     input:
-        tuple variantCaller, idSample, file(vcf)
+        // tuple variantCaller, idSample, file(vcf)
+        tuple variantCaller, idPatient, idSample, file(vcf) , file(vcf_tbi)
 
     output:
         // file ("*.bcf.tools.stats.out"), emit: bcftools_reports
@@ -3175,7 +3188,7 @@ process Vcftools {
     publishDir "${params.outdir}/Reports/${idSample}/VCFTools/${variantCaller}", mode: params.publish_dir_mode
 
     input:
-        tuple variantCaller, idSample, file(vcf)
+        tuple variantCaller, idPatient, idSample, file(vcf) , file(vcf_tbi)
 
     output:
         file ("${reduceVCF(vcf.fileName)}.*")
@@ -3518,7 +3531,7 @@ process CreateSomaticPON{
     file(germlineResourceIndex)
     
     output:
-    file(out_file)
+    tuple file(out_file), file ("${out_file}.tbi")
 
     when: 'gen_somatic_pon' in tools
 
@@ -3535,43 +3548,7 @@ process CreateSomaticPON{
     -O ${out_file}
     """
 }
-// process CreateSomaticPON{
-//     label 'cpus_max'
-//     // label 'memory_max'
-//      publishDir "${params.outdir}/Preprocessing/Somatic_pon", mode: params.publish_dir_mode
 
-//     input:
-//     file("vcfs/*") 
-//     file(fasta)
-//     file(fastaFai)
-//     file(dict)
-//     file(germlineResource)
-//     file(germlineResourceIndex)
-    
-//     output:
-//     file(out_file)
-
-//     when: 'gen_somatic_pon' in tools
-
-//     script:
-//     args_file = "normals_for_pon_vcf.args"
-//     out_file = "somatic_pon.vcf.gz" 
-//     // gen_pon_db = "gendb://${pon}"
-    
-//     """
-//     # first create the args file from all the normal vcfs
-//     for vcf in `ls vcfs/*.vcf.gz`
-//     do
-//         echo \${vcf} >> ${args_file} 
-//     done
-    
-//     gatk --java-options -Xmx${task.memory.toGiga()}g \
-//         CreateSomaticPanelOfNormals -R ${fasta} \
-//             --germline-resource ${germlineResource} \
-//             --variant ${args_file} \
-//             -O ${out_file}
-//     """
-// }
 
 /*
 ================================================================================
@@ -3579,39 +3556,39 @@ process CreateSomaticPON{
 ================================================================================
 */
 
-// process Mutect2{
-//     tag {idSample + "-" + intervalBed.baseName}
-//     label 'cpus_16'
+process Mutect2{
+    tag {idSample + "-" + intervalBed.baseName}
+    label 'cpus_16'
 
-//     input:
-//         tuple idPatient, idSample,file(bam), file(bai), file(intervalBed)
-//         file(dict)
-//         file(fasta)
-//         file(fastaFai)
-//         file(germlineResource)
-//         file(germlineResourceIndex)
-//     output:
-//         tuple idPatient,
-//             val("${idSampleTumor}_vs_${idSampleNormal}"),
-//             file("${intervalBed.baseName}_${idSample}.vcf")
-//         // tuple idPatient,
-//         //     idSampleTumor,
-//         //     idSampleNormal,
-//         //     file("${intervalBed.baseName}_${idSample}.vcf.stats") optional true
+    input:
+        tuple idPatient, idSample,file(bam), file(bai), file(intervalBed)
+        file(dict)
+        file(fasta)
+        file(fastaFai)
+        file(germlineResource)
+        file(germlineResourceIndex)
+    output:
+        tuple idPatient,
+            val("${idSampleTumor}_vs_${idSampleNormal}"),
+            file("${intervalBed.baseName}_${idSample}.vcf")
+        // tuple idPatient,
+        //     idSampleTumor,
+        //     idSampleNormal,
+        //     file("${intervalBed.baseName}_${idSample}.vcf.stats") optional true
 
-//     // when: 'mutect2_single' in tools
+    // when: 'mutect2_single' in tools
 
-//     """
-//     # Get raw calls
-//     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
-//       Mutect2 \
-//       -R ${fasta} \
-//       -I ${bam}  \
-//       -L ${intervalBed} \
-//       --germline-resource ${germlineResource} \
-//       -O ${intervalBed.baseName}_${idSample}.vcf
-//     """
-// }
+    """
+    # Get raw calls
+    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+      Mutect2 \
+      -R ${fasta} \
+      -I ${bam}  \
+      -L ${intervalBed} \
+      --germline-resource ${germlineResource} \
+      -O ${intervalBed.baseName}_${idSample}.vcf
+    """
+}
 
 /*
 ================================================================================
