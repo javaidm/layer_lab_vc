@@ -1199,13 +1199,21 @@ workflow{
     wf_merge_mapped_reads(MapReads.out.bam_mapped)
     wf_qc_filter_mapped_reads(MapReads.out.bam_mapped)
 
-    ch_merged_bams = wf_merge_mapped_reads.out.merged_bams
+    // Now depending upong the params.filter_bams, either send
+    // unfiltered or filtered bams for the downstream analysis
+    ch_merged_bams = Channel.empty()
+    if (params.filter_bams)
+        ch_merged_bams = wf_qc_filter_mapped_reads.out.merged_bams
+    else
+        ch_merged_bams = wf_merge_mapped_reads.out.merged_bams
     
+    // If the pipeline is being started from the step 'markdups'
+    // use bams from the provided tsv
     if (step == 'markdups'){
        ch_merged_bams = ch_input_sample
     }
 
-   
+   // MarkDuplicate Bams using gatk MarkDuplicates
     wf_mark_duplicates(ch_merged_bams)
     // wf_mark_duplicates output
     //tuple idPatient, idSample, file("md.bam"), file("md.bai")
@@ -1991,16 +1999,28 @@ process FilterBamRead1 {
 
     when: params.filter_bams
     script:
-    """
-    sambamba view -t ${task.cpus} -h \
-        -F "(first_of_pair and mapping_quality >=${params.bam_mapping_q} \
-            and not ([XA] != null or [SA] != null)) \
-            or second_of_pair" \
-            "${idSample}_${idRun}.bam" \
-        | samtools sort -n --threads ${task.cpus} \
-        | samtools fixmate - - \
-        | samtools view -h -f0x02 > "${idSample}_${idRun}_filtered_r1.bam"
-    """
+    if( params.remove_supplementary_reads)
+        """
+        sambamba view -t ${task.cpus} -h \
+            -F "(first_of_pair and mapping_quality >=${params.bam_mapping_q} \
+                and not ([XA] != null or [SA] != null)) \
+                or second_of_pair" \
+                "${idSample}_${idRun}.bam" \
+            | samtools sort -n --threads ${task.cpus} \
+            | samtools fixmate - - \
+            | samtools view -h -f0x02 > "${idSample}_${idRun}_filtered_r1.bam"
+        """
+
+    else
+        """
+        sambamba view -t ${task.cpus} -h \
+            -F "(first_of_pair and mapping_quality >=${params.bam_mapping_q}) \
+                or second_of_pair" \
+                "${idSample}_${idRun}.bam" \
+            | samtools sort -n --threads ${task.cpus} \
+            | samtools fixmate - - \
+            | samtools view -h -f0x02 > "${idSample}_${idRun}_filtered_r1.bam"
+        """
 }
 
 process FilterBamRead2 {
@@ -2016,16 +2036,27 @@ process FilterBamRead2 {
 
     when: params.filter_bams
     script:
-    """
-    sambamba view -t ${task.cpus} -h \
-        -F "(second_of_pair and mapping_quality >=${params.bam_mapping_q} \
-            and not ([XA] != null or [SA] != null)) \
-            or first_of_pair" \
-            "${idSample}_${idRun}.bam" \
-        | samtools sort -n --threads ${task.cpus} \
-        | samtools fixmate - - \
-        | samtools view -h -f0x02 > "${idSample}_${idRun}_filtered_r2.bam"
-    """
+    if( params.remove_supplementary_reads)
+        """
+        sambamba view -t ${task.cpus} -h \
+            -F "(second_of_pair and mapping_quality >=${params.bam_mapping_q} \
+                and not ([XA] != null or [SA] != null)) \
+                or first_of_pair" \
+                "${idSample}_${idRun}.bam" \
+            | samtools sort -n --threads ${task.cpus} \
+            | samtools fixmate - - \
+            | samtools view -h -f0x02 > "${idSample}_${idRun}_filtered_r2.bam"
+        """
+    else
+        """
+        sambamba view -t ${task.cpus} -h \
+            -F "(second_of_pair and mapping_quality >=${params.bam_mapping_q}) \
+                or first_of_pair" \
+                "${idSample}_${idRun}.bam" \
+            | samtools sort -n --threads ${task.cpus} \
+            | samtools fixmate - - \
+            | samtools view -h -f0x02 > "${idSample}_${idRun}_filtered_r2.bam"
+        """
 }
 
 process MergeFilteredBamReads {
