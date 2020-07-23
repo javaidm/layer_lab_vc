@@ -619,27 +619,48 @@ workflow wf_haplotypecaller{
         gvcf_GenotypeGVCFs = HaplotypeCaller.out.gvcf_GenotypeGVCFs
 } //  end of wf_haplotypecaller
 
-workflow wf_scattered_gvcfs_to_sample_gvcf_and_vcf{
+workflow wf_individually_genotype_gvcf{
     // input structure
     // tuple val("HaplotypeCallerGVCF"), idPatient, idSample, file("${intervalBed.baseName}_${idSample}.g.vcf")
     take: _gvcf_HC
-    take: _target_bed
+    take: _fasta
     take: _fasta_fai
+    take: _dict
+    take: _dbsnp
+    take: _dbsnp_index
+    take: _target_bed
     main:
+        IndividuallyGentoypeGVCF(
+            _gvcf_HC,
+            _fasta,
+            _fasta_fai,
+            _dict,
+            _dbsnp,
+            _dbsnp_index
+        )
+        
+        _vcf_concatVCF = 
+            IndividuallyGentoypeGVCF.out.vcf_HaplotypeCaller
+            .groupTuple(by: [0,1])
+            .map{ idPatient, idSample, vcfs -> 
+                ['HaplotypeCaller_Individually_Genotyped', idPatient, idSample, vcfs]
+            }
+            .dump(tag: "vcf_ConcatVcf")
+
         ConcatVCF(
-                _gvcf_HC,
+                _vcf_concatVCF,
                 _fasta_fai,
                 _target_bed,
                 'HC', // prefix for output files
-                'g.vcf', // extension for the output files
-                'HC_individually_genotyped_gvcf' // output directory name
+                'vcf', // extension for the output files
+                'HC_individually_genotyped_vcf' // output directory name
                 )
-        GvcfToVcf(
-                ConcatVCF.out.concatenated_vcf_without_index
-                )
+        // GvcfToVcf(
+        //         ConcatVCF.out.concatenated_vcf_without_index
+        //         )
     emit:
-        sample_gvcf_HC = ConcatVCF.out.concatenated_vcf_with_index
-        sample_vcf_HC = GvcfToVcf.out.vcf_HaplotypeCaller
+        sample_vcf_HC = IndividuallyGentoypeGVCF.out.vcf_HaplotypeCaller
+        // sample_vcf_HC = GvcfToVcf.out.vcf_HaplotypeCaller
 }
 
 
@@ -1199,8 +1220,11 @@ workflow{
     wf_merge_mapped_reads(MapReads.out.bam_mapped)
     wf_qc_filter_mapped_reads(MapReads.out.bam_mapped)
 
-    // Now depending upong the params.filter_bams, either send
-    // unfiltered or filtered bams for the downstream analysis
+    /* 
+    Now depending upong the params.filter_bams, either send
+    unfiltered or filtered bams for the downstream analysis
+    */
+    
     ch_merged_bams = Channel.empty()
     if (params.filter_bams)
         ch_merged_bams = wf_qc_filter_mapped_reads.out.merged_bams
@@ -1348,11 +1372,33 @@ workflow{
         ch_dbsnp,
         ch_dbsnp_index
     )
+    // Create individual gvcfs without any genotyping
+     gvcf_ConcatVCF = 
+            wf_haplotypecaller.out.gvcf_GenotypeGVCFs
+            .groupTuple(by: [0,1])
+            .map{ idPatient, idSample, interval_beds,  gvcfs -> 
+                ['HaplotypeCaller_gvcf', idPatient, idSample, gvcfs]
+            }
+            .dump(tag: "gvcfs_ConcatVcf")
 
-    wf_scattered_gvcfs_to_sample_gvcf_and_vcf(
-        wf_haplotypecaller.out.gvcf_HC,
-        ch_target_bed,
-        ch_fasta_fai
+    ConcatVCF(
+                gvcf_ConcatVCF,
+                ch_fasta_fai,
+                ch_target_bed,
+                'HC', // prefix for output files
+                'g.vcf', // extension for the output files
+                'HC_individually_genotyped_gvcf' // output directory name
+                )
+
+    // individually genotype gvcfs
+    wf_individually_genotype_gvcf(
+        wf_haplotypecaller.out.gvcf_GenotypeGVCFs,
+        ch_fasta,
+        ch_fasta_fai,
+        ch_dict,
+        ch_dbsnp,
+        ch_dbsnp_index,
+        ch_target_bed
     )
 
     wf_genotype_gvcf(
@@ -1517,7 +1563,8 @@ def helpMessage() {
         --filter_bams               Generate additional filter Bams based upon the bam_mapping_q parameter
         --bam_mapping_q             Specify the lower threshold for mapping quality (defaults to 60). All reads below this threshold will be discarded
                                     when generate the additional bams (you must specify the param --filter-bams)
-
+        --remove_supplementary_reads When specified in addition to --filter_bams, will appy the following 
+                                    sambamba expression to remove the supplementary reads 'not ([XA] != null or [SA] != null)'
     References                      If not specified in the configuration file or you wish to overwrite any of the references.
         --bwa_index                  bwa indexes
                                     If none provided, will be generated automatically from the fasta reference
@@ -2580,21 +2627,53 @@ process HaplotypeCaller {
     """
 }
 
-process GvcfToVcf{
-    label 'memory_singleCPU_task_sq'
-    label 'cpus_2'
-    // label 'memory_max'
-    // label 'cpus_max'
+// process GvcfToVcf{
+//     label 'memory_singleCPU_task_sq'
+//     label 'cpus_2'
+//     // label 'memory_max'
+//     // label 'cpus_max'
 
+//     tag {idSample + "-" + gvcf.baseName}
+//     // tag {idSample} 
+//     publishDir "${params.outdir}/VariantCalling/${idSample}/HC_individually_genotyped_vcf", mode: params.publish_dir_mode
+//     input:
+//         tuple val(variantCaller), idPatient, idSample, file(gvcf)
+
+//     output:
+//         // tuple val('HaplotypeCaller_Individually_Genotyped'), idPatient, idSample, file("${gvcf.simpleName}.vcf"), emit: vcf_HaplotypeCaller
+//         tuple val('HaplotypeCaller_Individually_Genotyped'), idPatient, idSample, file(out_file), emit: vcf_HaplotypeCaller
+
+//     when: 'haplotypecaller' in tools
+
+//     script:
+//     // fn=gvcf.fileName
+//     // prefix=fn.minus(".g.vcf")
+//     // out_file="${gvcf.fileName}.vcf"
+//     prefix="${gvcf.fileName}" - ".g.vcf.gz"
+//     // We'll first decompress the gvcf
+//     in_file= "${gvcf.fileName}" - ".gz"
+//     out_file="${prefix}.vcf"
+//     """
+//     gzip -d --force ${gvcf}
+//     extract_variants < ${in_file} > ${out_file}
+//     """
+// }
+
+process IndividuallyGentoypeGVCF{
+    label 'cpus_8'
     tag {idSample + "-" + gvcf.baseName}
     // tag {idSample} 
-    publishDir "${params.outdir}/VariantCalling/${idSample}/HC_individually_genotyped_vcf", mode: params.publish_dir_mode
+    // publishDir "${params.outdir}/VariantCalling/${idSample}/HC_individually_genotyped_vcf", mode: params.publish_dir_mode
     input:
-        tuple val(variantCaller), idPatient, idSample, file(gvcf)
-
+        tuple idPatient, idSample, file(intervalsBed), file(gvcf)
+        file(fasta)
+        file(fastaFai)
+        file(dict)
+        file(dbsnp)
+        file(dbsnpIndex)
     output:
         // tuple val('HaplotypeCaller_Individually_Genotyped'), idPatient, idSample, file("${gvcf.simpleName}.vcf"), emit: vcf_HaplotypeCaller
-        tuple val('HaplotypeCaller_Individually_Genotyped'), idPatient, idSample, file(out_file), emit: vcf_HaplotypeCaller
+        tuple idPatient, idSample, file(out_file), emit: vcf_HaplotypeCaller
 
     when: 'haplotypecaller' in tools
 
@@ -2602,13 +2681,20 @@ process GvcfToVcf{
     // fn=gvcf.fileName
     // prefix=fn.minus(".g.vcf")
     // out_file="${gvcf.fileName}.vcf"
-    prefix="${gvcf.fileName}" - ".g.vcf.gz"
+    prefix="${gvcf.fileName}" - ".g.vcf"
     // We'll first decompress the gvcf
-    in_file= "${gvcf.fileName}" - ".gz"
+    // in_file= "${gvcf.fileName}" - ".gz"
     out_file="${prefix}.vcf"
     """
-    gzip -d --force ${gvcf}
-    extract_variants < ${in_file} > ${out_file}
+    bgzip  ${gvcf}
+    tabix  ${gvcf}.gz
+    gatk --java-options -Xmx${task.memory.toGiga()}g \
+        GenotypeGVCFs \
+        -R ${fasta} \
+        -L ${intervalsBed} \
+        -D ${dbsnp} \
+        -V ${gvcf}.gz \
+        -O "${out_file}"
     """
 }
 
@@ -4130,7 +4216,7 @@ def defineToolList() {
         'deepvariant',
         'benchmark_dv_and_hc_against_giab',
         'benchmark_dv_against_hc',
-        'hap_py',
+        // 'hap_py',
         'manta',
         'merge',
         'mpileup',
