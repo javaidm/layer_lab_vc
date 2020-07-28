@@ -567,7 +567,7 @@ workflow wf_recal_bams{
 } // end of wf_recal_bams
 
 workflow wf_qc_recal_bams{
-    take: _bam_recal_qc
+    take: _bam_recal_qc // tuple idPatient, idSample, file(bam)
     take: _target_bed
     take: _bait_bed
     take: _fasta
@@ -590,10 +590,16 @@ workflow wf_qc_recal_bams{
             _target_bed,
             _bait_bed,
         )
+        BamQC(
+            _bam_recal_qc,
+            _target_bed
+        )
+
     emit:
         samtools_stats =  SamtoolsStats.out
         alignment_summary_metrics = CollectAlignmentSummaryMetrics.out
         hs_metrics = CollectHsMetrics.out
+        bam_qc = BamQC.out
 } // end of wf_qc_recal_bams
 
 workflow wf_haplotypecaller{
@@ -1163,7 +1169,8 @@ workflow wf_annotate{
 
 workflow wf_multiqc{
     // to do
-    take: software_versions 
+    take: software_versions
+    take: bam_qc
     take: fastqc_out 
     take: bcftools_out 
     take: vcftools_out 
@@ -1176,6 +1183,7 @@ workflow wf_multiqc{
         MultiQC(
             Channel.value(""),
             software_versions,
+            bam_qc,
             fastqc_out,
             bcftools_out,
             vcftools_out,
@@ -1444,6 +1452,7 @@ workflow{
     wf_multiqc(
         wf_get_software_versions.out,
         FastQCFQ.out.collect().ifEmpty([]),
+        wf_qc_recal_bams.out.bam_qc,
         wf_vcf_stats.out.bcfootls_stats,
         wf_vcf_stats.out.vcfootls_stats,
         wf_mark_duplicates.out.dm_bam_stats,
@@ -3997,7 +4006,7 @@ process MultiQC {
     input:
         file (multiqcConfig) 
         file (versions) 
-        // file ('bamQC/*') 
+        file ('bamQC/*') 
         file ('FastQC/*') 
         file ('BCFToolsStats/*') 
         file ('VCFTools/*')
