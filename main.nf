@@ -424,7 +424,6 @@ workflow wf_mark_duplicates{
         MarkDuplicates(_bams)
     emit:
         dm_bams = MarkDuplicates.out.marked_bams
-        dm_bam_stats = MarkDuplicates.out[1]
 }
 
 // workflow wf_filter_bams{
@@ -1174,7 +1173,7 @@ workflow wf_multiqc{
     take: fastqc_out 
     take: bcftools_out 
     take: vcftools_out 
-    take: dm_bam_stats
+    // take: dm_bam_stats
     take: samtools_stats
     take: alignment_summary_metrics
     take: hs_metrics
@@ -1187,7 +1186,7 @@ workflow wf_multiqc{
             fastqc_out,
             bcftools_out,
             vcftools_out,
-            dm_bam_stats,
+            // dm_bam_stats,
             samtools_stats,
             alignment_summary_metrics,
             hs_metrics
@@ -1455,7 +1454,7 @@ workflow{
         wf_qc_recal_bams.out.bam_qc,
         wf_vcf_stats.out.bcfootls_stats,
         wf_vcf_stats.out.vcfootls_stats,
-        wf_mark_duplicates.out.dm_bam_stats,
+        // wf_mark_duplicates.out.dm_bam_stats,
         wf_qc_recal_bams.out.samtools_stats,
         wf_qc_recal_bams.out.alignment_summary_metrics,
         wf_qc_recal_bams.out.hs_metrics
@@ -2258,7 +2257,7 @@ process Sambamba_MD {
     """
 }
 
-process MarkDuplicates {
+process MarkDuplicatesGATK {
     label 'cpus_max'
     // label 'memory_max'
     // cache false
@@ -2300,6 +2299,31 @@ process MarkDuplicates {
     """
 }
 
+process MarkDuplicates {
+    label 'cpus_max'
+    tag {idPatient + "-" + idSample}
+
+    publishDir "${params.outdir}/Preprocessing/${idSample}/DuplicateMarked_sb/", mode: params.publish_dir_mode
+
+    input:
+        tuple idPatient, idSample, file("${idSample}.bam"), file("${idSample}.bai")
+
+    output:
+        tuple idPatient, idSample, file("${idSample}.md.bam"), file("${idSample}.md.bai"), emit: marked_bams
+        // file ("${idSample}.bam.metrics")
+
+    when: params.known_indels
+
+    script:
+    """
+    samtools sort -n --threads ${task.cpus}  -O SAM  ${idSample}.bam | \
+        samblaster -M | \
+        samtools sort --threads ${task.cpus}  -O BAM > ${idSample}.md.bam
+
+    samtools index ${idSample}.md.bam && \
+        mv ${idSample}.md.bam.bai ${idSample}.md.bai
+    """
+}
 
 process BaseRecalibrator {
     // label 'cpus_1'
@@ -4010,7 +4034,7 @@ process MultiQC {
         file ('FastQC/*') 
         file ('BCFToolsStats/*') 
         file ('VCFTools/*')
-        file ('MarkDuplicates/*') 
+        // file ('MarkDuplicates/*') 
         file ('SamToolsStats/*') 
         file ('CollectAlignmentSummary/*')
         file ('CollectHsMetrics/*')
