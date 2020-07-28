@@ -581,6 +581,10 @@ workflow wf_qc_recal_bams{
             _fasta_fai,
             _dict
         )
+        CollectInsertSizeMetrics(
+             _bam_recal_qc
+        )
+
         CollectHsMetrics(
             _bam_recal_qc,
             _fasta,
@@ -597,6 +601,8 @@ workflow wf_qc_recal_bams{
     emit:
         samtools_stats =  SamtoolsStats.out
         alignment_summary_metrics = CollectAlignmentSummaryMetrics.out
+        insert_size_metrics = CollectInsertSizeMetrics.out[0]
+        insert_size_metrics_pdf = CollectInsertSizeMetrics.out[1]
         hs_metrics = CollectHsMetrics.out
         bam_qc = BamQC.out
 } // end of wf_qc_recal_bams
@@ -1176,6 +1182,7 @@ workflow wf_multiqc{
     // take: dm_bam_stats
     take: samtools_stats
     take: alignment_summary_metrics
+    take: insert_size_metrics
     take: hs_metrics
 
     main:
@@ -1189,6 +1196,7 @@ workflow wf_multiqc{
             // dm_bam_stats,
             samtools_stats,
             alignment_summary_metrics,
+            insert_size_metrics,
             hs_metrics
             // SnpEff.out.snpEff_report,
         )
@@ -1457,7 +1465,8 @@ workflow{
         // wf_mark_duplicates.out.dm_bam_stats,
         wf_qc_recal_bams.out.samtools_stats,
         wf_qc_recal_bams.out.alignment_summary_metrics,
-        wf_qc_recal_bams.out.hs_metrics
+        wf_qc_recal_bams.out.insert_size_metrics, 
+        wf_qc_recal_bams.out.hs_metrics.ifEmpty([])
     )
 //    wf_annotate()
 //    wf_multiqc()
@@ -2577,6 +2586,31 @@ process CollectAlignmentSummaryMetrics{
     -I ${bam} \
     -O ${bam.baseName}_alignment_metrics.txt \
     -R ${fasta}
+    """
+}
+
+process CollectInsertSizeMetrics{
+    label 'cpus_16'
+    tag {idPatient + "-" + idSample}
+    
+    publishDir "${params.outdir}/Reports/${idSample}/insert_size_metrics/", mode: params.publish_dir_mode
+    
+    input:
+    tuple idPatient, idSample, file(bam)
+
+    output:
+    file("${bam.baseName}_insert_size_metrics.txt")
+    file("${bam.baseName}_insert_size_histogram.pdf")
+    
+    
+    when: !('insert_size_metrics' in skipQC)
+
+    script:
+    """
+    gatk --java-options -Xmx32G CollectInsertSizeMetrics --VALIDATION_STRINGENCY LENIENT \
+    -I ${bam} \
+    -O ${bam.baseName}_insert_size_metrics.txt \
+    -H ${bam.baseName}_insert_size_histogram.pdf 
     """
 }
 
@@ -4037,6 +4071,7 @@ process MultiQC {
         // file ('MarkDuplicates/*') 
         file ('SamToolsStats/*') 
         file ('CollectAlignmentSummary/*')
+        file ('CollectInsertSizeMetrics/*')
         file ('CollectHsMetrics/*')
         // file ('snpEff/*') 
 
