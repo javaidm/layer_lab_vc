@@ -1217,7 +1217,7 @@ workflow{
     wf_partition_fastq()
     ch_input_pair_reads = wf_partition_fastq.out.pair_reads
 
-    FastQCFQ(ch_input_pair_reads)     
+    FastQCFQ(ch_input_sample)     
     MapReads(
         ch_input_pair_reads, 
             ch_fasta,
