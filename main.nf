@@ -2317,7 +2317,7 @@ process MarkDuplicates {
     script:
     """
     samtools sort -n --threads ${task.cpus}  -O SAM  ${idSample}.bam | \
-        samblaster -M | \
+        samblaster -M --ignoreUnmated| \
         samtools sort --threads ${task.cpus}  -O BAM > ${idSample}.md.bam
 
     samtools index ${idSample}.md.bam && \
