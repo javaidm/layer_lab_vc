@@ -333,9 +333,11 @@ workflow wf_merge_mapped_reads{
         .map { idPatient, idSample, bamFile ->
             status = statusMap[idPatient, idSample]
             gender = genderMap[idPatient]
-            bam = "${params.outdir}/Bams/${idSample}/${idSample}.bam"
-            bai = "${params.outdir}/Bams/${idSample}/${idSample}.bai"
-            "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"
+            bam = "${params.outdir}/Preprocessing/${idSample}/Bams/${idSample}.bam"
+            bai = "${params.outdir}/Preprocessing/${idSample}/Bams/${idSample}.bai"
+            bam_file = file(bam)
+            bai_file = file(bai)
+            "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam_file}\t${bai_file}\n"
         }.collectFile(
             name: 'mapped_bam.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
         )
@@ -345,8 +347,8 @@ workflow wf_merge_mapped_reads{
             .map { idPatient, idSample, bamFile ->
                 status = statusMap[idPatient, idSample]
                 gender = genderMap[idPatient]
-                bam = "${params.outdir}/Bams/${idSample}/${idSample}_pq${params.bam_mapping_q}.bam"
-                bai = "${params.outdir}/Bams/${idSample}/${idSample}_pq${params.bam_mapping_q}.bai"
+                bam = "${params.outdir}/Preprocessing/${idSample}/Bams/${idSample}_pq${params.bam_mapping_q}.bam"
+                bai = "${params.outdir}/Preprocessing/${idSample}/Bams/${idSample}_pq${params.bam_mapping_q}.bai"
                 "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"
             }.collectFile(
                 name: "mapped_bam_${params.bam_mapping_q}.tsv", sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
@@ -389,31 +391,7 @@ workflow wf_qc_filter_mapped_reads{
         .dump(tag: 'qc_bams_for_merging')
         // STEP 1.5: MERGING BAM FROM MULTIPLE LANES
         MergeBamMapped(filtered_out_bams)
-        // put the string qc_60 or whatever the quality is there in the filename
-        // bams_index = MergeBamMapped.out
-        //             .map{ idPatient, idSample, bam -> 
-        //                   bam_base_name = file(bam).baseName
-        //                   new_bam_name =  "${bam_base_name}_pq${params.bam_mapping_q}.bam"
-        //                   bam.renameTo(new_bam_name)
-        //                   [idPatient, idSample, bam]
-        //             }
-        //             .dump(tag: 'bams_index: ')
-
         IndexBamFile(MergeBamMapped.out)
-        
-        // // Creating a TSV file to restart from this step
-        // merged_bams = 
-        // .map { idPatient, idSample, bamFile ->
-        //     status = statusMap[idPatient, idSample]
-        //     gender = genderMap[idPatient]
-        //     bam = "${params.outdir}/Bams/${idSample}/${idSample}.bam"
-        //     bai = "${params.outdir}/Bams/${idSample}/${idSample}.bai"
-        //     "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"
-        // }.collectFile(
-        //     name: 'mapped_bam_dummy.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
-        // )
-        
-        // exit 1, 'leaving early!'
     emit:
         merged_bams = IndexBamFile.out
 } // end of wf_map_reads
@@ -426,18 +404,6 @@ workflow wf_mark_duplicates{
         dm_bams = MarkDuplicates.out.marked_bams
 }
 
-// workflow wf_filter_bams{
-//     take: _bams
-//     main:
-//         FilterBamRead1(_bams)
-//         FilterBamRead2(_bams)
-//         filtered_reads = Channel.empty()
-//             .mix(FilterBamRead1.out.filtered_reads,
-//                 FilterBamRead2.out.filtered_reads)
-//             .groupTuple(by:[0, 1])
-//             // .dump(tag: 'filtered_bams')
-//         MergeFilteredBamReads(filtered_reads)
-// }
 
 workflow wf_deepvariant{
     take: _dm_bams
@@ -458,12 +424,12 @@ workflow wf_deepvariant{
                 _target_bed)
         DV_CallVariants(DV_MakeExamples.out.shared_examples)
         DV_PostprocessVariants(
-        DV_CallVariants.out.variant_tf_records,
-        _fasta_gz,
+            DV_CallVariants.out.variant_tf_records,
+            _fasta_gz,
             _fasta_gz_fai,
             _fasta_gzi
-            )
-    
+        )
+
     emit:
         vcf = DV_PostprocessVariants.out.vcf
         vcf_to_annotate = DV_PostprocessVariants.out.vcf_to_annotate
@@ -850,6 +816,66 @@ workflow wf_somatic_pon{
         somatic_pon = CreateSomaticPON.out
         
 } // end of wf_somatic_pon
+
+// workflow wf_mutect2_tumor_normal{
+//     take: _int_pair_bam
+//     take: _fasta
+//     take: _fasta_fai
+//     take: _dict
+//     take: _germline_resource
+//     take: _germline_resource_index
+//     take: _pon_somatic
+//     take: _pon_somatic_index
+//     take: _target_bed
+//     main:
+//         Mutect2(
+//             _int_pair_bam,
+//             _fasta,
+//             _fasta_fai,
+//             _dict,
+//             _germline_resource,
+//             _germline_resource_index,
+//             _pon_somatic,
+//             _pon_somatic_index
+//         )
+
+//         // Gather mutect2 outputs
+//         _mutect2_output = Mutect2.out.[0].groupTuple(by: [0,1,2])
+//         ConcatVCF(
+//             _concat_vcf,
+//             _fasta_fai,
+//             _target_bed,
+//             'Mu2', // prefix for output files
+//             'vcf', // extension for the output files
+//             'Mutect2_tumor_normal' // output directory name
+//             )
+
+//         // Gather mutect2 stats
+//         _mutect2_stats = Mutect2.out.[1].groupTuple(by: [0,1,2])
+//         MergeMutect2Stats(_mutect2_stats)
+//         // Gather pileup summaries for each tumor file to calculate contamination
+//         // Summarizes counts of reads that support reference, 
+//         // alternate and other alleles for given sites
+//         PileupSummariesForMutect2(_int_pair_bam)
+
+//         // Gather pileup summaries
+//         _pileupsummaries = PileupSummariesForMutect2.out.groupTuple(by: [0,1])
+//         MergePileupSummaries(_pileupsummaries,
+//                              _dict)
+
+//         CalculateContamination(MergePileupSummaries.out)
+
+//         /* Now we need to gather the unfiltered vcfs (for TN pairs), and get corresponding
+//             merged stats, as well as contamination tables
+//             ConcatVCF: 
+//             tuple variantCaller, idPatient, idSample, file("${outFile}.gz"), file("${outFile}.gz.tbi"), emit: concatenated_vcf_with_index
+//         */
+//         _filter_mutect2_calls =         
+//         FilterMutect2Calls
+
+//     emit:
+//         filtered_vcf = FilterMutect2Calls.out
+// } // end of wf_mutect2_tumor_normal
 
 workflow wf_hap_py{
     take: deepvariant_vcfs
@@ -1295,6 +1321,16 @@ workflow{
     ch_int_bam_recal = wf_recal_bams.out.bam_recal
                     .combine(ch_bed_intervals)
    
+    // Run QC metrics generation processes on the recalibrated bams
+
+    wf_qc_recal_bams(
+            wf_recal_bams.out.bam_recal_qc,
+            ch_target_bed,
+            ch_bait_bed,
+            ch_fasta,
+            ch_fasta_fai,         
+            ch_dict
+            )
 
     // Handle the Mutect2 related workflows
 
@@ -1308,16 +1344,15 @@ workflow{
         }
     bam_normal.dump(tag: 'bam_normal: ')
     bam_tumor.dump(tag: 'bam_tumor: ')
-
-    // Crossing Normal and Tumor to get a T/N pair for Somatic Variant Calling
-    // Remapping channel to remove common key idPatient
-    pair_bam = bam_normal.cross(bam_tumor).map {
-        normal, tumor ->
-        [normal[0], normal[1], normal[2], normal[3], tumor[1], tumor[2], tumor[3]]
-    }
+    
     // We need to prepare samples going to the mutect2 single sample mode.
-    // This depends upon what is included in the params.tools. Is it just the mutect2_single
+    // This depends upon what is included in the params.tools. 
+    // Is it just the mutect2_single
     // or gen_somatic_pon or both
+    // For generating a somatic pon, we only need normal bams.
+    // When running mutect2_single without the intent of generating a somatic_pon,
+    // run it on all bams (tumors plus normals)
+
     ch_int_mutec2_single_bams = Channel.empty()
     if ('mutect2_single' in tools ) // use all bams (normal plus tumor)
         ch_int_mutec2_single_bams = wf_recal_bams.out.bam_recal.combine(ch_bed_intervals)
@@ -1345,15 +1380,6 @@ workflow{
                     .collect()
                     .dump(tag: "somatic_pon_vcf")
 
-    // CreateSomaticPON(
-    //         somatic_pon_vcf,
-    //         ch_fasta,
-    //         ch_fasta_fai,
-    //         ch_dict,
-    //         ch_germline_resource,
-    //         ch_germline_resource_index
-    // )
-
     wf_somatic_pon(
             somatic_pon_vcf,
             ch_fasta,
@@ -1363,18 +1389,17 @@ workflow{
             ch_germline_resource_index,
             ch_target_bed
     )
-    // Generating the somatic panel of normals
+    // Mutect2 Tumor/Normal mode
+    // Crossing Normal and Tumor to get a T/N pair for Somatic Variant Calling
+    // Remapping channel to remove common key idPatient
+    pair_bam = bam_normal.cross(bam_tumor).map {
+        normal, tumor ->
+        [normal[0], normal[1], normal[2], normal[3], tumor[1], tumor[2], tumor[3]]
+    }
 
-    // bam_recal = wf_recal_bams.out.bam_recal
-
-    wf_qc_recal_bams(
-            wf_recal_bams.out.bam_recal_qc,
-            ch_target_bed,
-            ch_bait_bed,
-            ch_fasta,
-            ch_fasta_fai,         
-            ch_dict
-            )
+    // spread the pair_bam across intervals for parallelization
+    ch_int_pair_bam = pair_bam.combine(ch_bed_intervals)
+    
 
     // bam_HaplotypeCaller => [idPatient, idSample, recalibrated bam, bam.bai, single interval to operate on]
     
@@ -1574,9 +1599,9 @@ def helpMessage() {
                                     Default: None
                                     Adds the following tools for --tools: DNAseq, DNAscope and TNscope
         --annotation_cache          Enable the use of cache for annotation, to be used with --snpEff_cache and/or --vep_cache        
-        --somatic_pon               panel-of-normals VCF (bgzipped, indexed). See: https://software.broadinstitute.org/gatk/documentation/tooldocs/current/org_broadinstitute_hellbender_tools_walkers_mutect_CreateSomaticPanelOfNormals.php
-        --somatic_pon_index         index of pon panel-of-normals VCF
-        --read_count_pon            panel-of-normals hdf5 file. See https://gatk.broadinstitute.org/hc/en-us/articles/360040510031-CreateReadCountPanelOfNormals
+        --pon_somatic               panel-of-normals VCF (bgzipped, indexed). See: https://software.broadinstitute.org/gatk/documentation/tooldocs/current/org_broadinstitute_hellbender_tools_walkers_mutect_CreateSomaticPanelOfNormals.php
+        --pon_somatic_index         index of pon panel-of-normals VCF
+        --pon_read_count            panel-of-normals hdf5 file. See https://gatk.broadinstitute.org/hc/en-us/articles/360040510031-CreateReadCountPanelOfNormals
         --filter_bams               Generate additional filter Bams based upon the bam_mapping_q parameter
         --bam_mapping_q             Specify the lower threshold for mapping quality (defaults to 60). All reads below this threshold will be discarded
                                     when generate the additional bams (you must specify the param --filter-bams)
@@ -2013,7 +2038,6 @@ process MapReads {
     label 'cpus_max'
 
     tag {idPatient + "-" + idRun}
-    // publishDir "${params.outdir}/Bams/${idSample}/${idSample}_${idRun}", mode: params.publish_dir_mode
 
     input:
         tuple idPatient, idSample, idRun, file(inputFile1), file(inputFile2)
@@ -2127,8 +2151,6 @@ process MergeFilteredBamReads {
     label 'cpus_32'
     tag {idPatient + "-" + idSample}
 
-    // publishDir "${params.outdir}/Bams/${idSample}", mode: params.publish_dir_mode
-
     input:
         tuple idPatient, idSample, idRun, file(partial_filtered_bams)
 
@@ -2154,9 +2176,6 @@ process MergeFilteredBamReads {
 process FilterOutSecondaryAndSupplementaryReads {
     label 'cpus_32'
     tag {idPatient + "-" + idSample}
-
-    // publishDir "${params.outdir}/Bams/${idSample}", mode: params.publish_dir_mode
-
     input:
         tuple idPatient, idSample, idRun,  file("${idSample}_${idRun}_filtered.bam"), file(bai)
 
@@ -2225,8 +2244,9 @@ process MergeBamMapped {
 
 process IndexBamFile {
     label 'cpus_16'
-    publishDir "${params.outdir}/Bams/${idSample}/", mode: params.publish_dir_mode
     tag {idPatient + "-" + idSample}
+    
+    publishDir "${params.outdir}/Preprocessing/${idSample}/Bams/", mode: params.publish_dir_mode
 
     input:
         tuple idPatient, idSample, file(bam)
@@ -2245,74 +2265,74 @@ process IndexBamFile {
 
 // STEP 2: MARKING DUPLICATES
 
-process Sambamba_MD {
-    label 'cpus_32'
-    // label 'memory_max'
-    // cache false
-    tag {idPatient + "-" + idSample}
+// process Sambamba_MD {
+//     label 'cpus_32'
+//     // label 'memory_max'
+//     // cache false
+//     tag {idPatient + "-" + idSample}
 
-    publishDir "${params.outdir}/Preprocessing/${idSample}/DuplicateMarked/", mode: params.publish_dir_mode
+//     publishDir "${params.outdir}/Preprocessing/${idSample}/DuplicateMarked/", mode: params.publish_dir_mode
 
-    input:
-        tuple idPatient, idSample, file("${idSample}.bam")
+//     input:
+//         tuple idPatient, idSample, file("${idSample}.bam")
 
-    output:
-        tuple idPatient, idSample, file("${idSample}.md.bam"), file("${idSample}.md.bai")
+//     output:
+//         tuple idPatient, idSample, file("${idSample}.md.bam"), file("${idSample}.md.bai")
 
-    """
-    sambamba markdup -t 20 -p ${idSample}.bam ${idSample}.md.bam
-    samtools index ${idSample}.md.bam
-    mv ${idSample}.md.bam.bai ${idSample}.md.bai
-    """
-}
+//     """
+//     sambamba markdup -t 20 -p ${idSample}.bam ${idSample}.md.bam
+//     samtools index ${idSample}.md.bam
+//     mv ${idSample}.md.bam.bai ${idSample}.md.bai
+//     """
+// }
 
-process MarkDuplicatesGATK {
-    label 'cpus_max'
-    // label 'memory_max'
-    // cache false
-    tag {idPatient + "-" + idSample}
+// process MarkDuplicatesGATK {
+//     label 'cpus_max'
+//     // label 'memory_max'
+//     // cache false
+//     tag {idPatient + "-" + idSample}
 
-    publishDir params.outdir, mode: params.publish_dir_mode,
-        saveAs: {
-            if (it == "${idSample}.bam.metrics" && 'markduplicates' in skipQC) null
-            else if (it == "${idSample}.bam.metrics") "Reports/${idSample}/MarkDuplicates/${it}"
-            else "Preprocessing/${idSample}/DuplicateMarked/${it}"
-        }
+//     publishDir params.outdir, mode: params.publish_dir_mode,
+//         saveAs: {
+//             if (it == "${idSample}.bam.metrics" && 'markduplicates' in skipQC) null
+//             else if (it == "${idSample}.bam.metrics") "Reports/${idSample}/MarkDuplicates/${it}"
+//             else "Preprocessing/${idSample}/DuplicateMarked/${it}"
+//         }
 
-    input:
-        tuple idPatient, idSample, file("${idSample}.bam"), file("${idSample}.bai")
-        // tuple idPatient, idSample, file("${idSample}.bam")
+//     input:
+//         tuple idPatient, idSample, file("${idSample}.bam"), file("${idSample}.bai")
+//         // tuple idPatient, idSample, file("${idSample}.bam")
 
-    output:
-        tuple idPatient, idSample, file("${idSample}.md.bam"), file("${idSample}.md.bai"), emit: marked_bams
-        // tuple file ("${idSample}.bam.metrics"), emit: bam_stats
-        file ("${idSample}.bam.metrics")
+//     output:
+//         tuple idPatient, idSample, file("${idSample}.md.bam"), file("${idSample}.md.bai"), emit: marked_bams
+//         // tuple file ("${idSample}.bam.metrics"), emit: bam_stats
+//         file ("${idSample}.bam.metrics")
 
-    when: params.known_indels
+//     when: params.known_indels
 
-    script:
-    // markdup_java_options = task.memory.toGiga() > 8 ? params.markdup_java_options : "\"-Xms" +  (task.memory.toGiga() / 2).trunc() + "g -Xmx" + (task.memory.toGiga() - 1) + "g\""
-    markdup_java_options =  "\"-Xms" +  (task.memory.toGiga() / 2).trunc() + "g -Xmx" + (task.memory.toGiga() - 1) + "g\""
-    // markdup_java_options =  "\"-Xms" + 16 + "g -Xmx" + 32 + "g\""
-    // markdup_java_options =  "\"-Xms16g -Xmx32g\""
-    """
-    gatk --java-options ${markdup_java_options} \
-        MarkDuplicates \
-        --MAX_RECORDS_IN_RAM 500000 \
-        --INPUT ${idSample}.bam \
-        --METRICS_FILE ${idSample}.bam.metrics \
-        --TMP_DIR . \
-        --ASSUME_SORT_ORDER coordinate \
-        --CREATE_INDEX true \
-        --OUTPUT ${idSample}.md.bam
-    """
-}
+//     script:
+//     // markdup_java_options = task.memory.toGiga() > 8 ? params.markdup_java_options : "\"-Xms" +  (task.memory.toGiga() / 2).trunc() + "g -Xmx" + (task.memory.toGiga() - 1) + "g\""
+//     markdup_java_options =  "\"-Xms" +  (task.memory.toGiga() / 2).trunc() + "g -Xmx" + (task.memory.toGiga() - 1) + "g\""
+//     // markdup_java_options =  "\"-Xms" + 16 + "g -Xmx" + 32 + "g\""
+//     // markdup_java_options =  "\"-Xms16g -Xmx32g\""
+//     """
+//     gatk --java-options ${markdup_java_options} \
+//         MarkDuplicates \
+//         --MAX_RECORDS_IN_RAM 2000000 \
+//         --INPUT ${idSample}.bam \
+//         --METRICS_FILE ${idSample}.bam.metrics \
+//         --TMP_DIR . \
+//         --ASSUME_SORT_ORDER coordinate \
+//         --CREATE_INDEX true \
+//         --OUTPUT ${idSample}.md.bam
+//     """
+// }
 
 process MarkDuplicates {
     label 'cpus_max'
     tag {idPatient + "-" + idSample}
 
-    publishDir "${params.outdir}/Preprocessing/${idSample}/DuplicateMarked_sb/", mode: params.publish_dir_mode
+    publishDir "${params.outdir}/Preprocessing/${idSample}/DuplicateMarked/", mode: params.publish_dir_mode
 
     input:
         tuple idPatient, idSample, file("${idSample}.bam"), file("${idSample}.bai")
@@ -2321,7 +2341,7 @@ process MarkDuplicates {
         tuple idPatient, idSample, file("${idSample}.md.bam"), file("${idSample}.md.bai"), emit: marked_bams
         // file ("${idSample}.bam.metrics")
 
-    when: params.known_indels
+    when: !(step in ['recalibrate', 'variantcalling', 'annotate'])
 
     script:
     """
@@ -2356,11 +2376,11 @@ process BaseRecalibrator {
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.table")
         // set idPatient, idSample into recalTableTSVnoInt
 
-    when: params.known_indels && 
-        ('haplotypecaller' in tools || 
-        'mutect2' in tools ||
-        'mutect2_single' in tools ||
-        'gen_somatic_pon' in tools)
+    when: params.known_indels  
+        // ('haplotypecaller' in tools || 
+        // 'mutect2' in tools ||
+        // 'mutect2_single' in tools ||
+        // 'gen_somatic_pon' in tools)
 
     script:
     dbsnpOptions = params.dbsnp ? "--known-sites ${dbsnp}" : ""
@@ -2400,11 +2420,11 @@ process GatherBQSRReports {
         tuple idPatient, idSample, file("${idSample}.recal.table"), emit: recal_table
         // set idPatient, idSample into recalTableTSV
 
-    when: params.known_indels &&
-        ('haplotypecaller' in tools || 
-            'mutect2' in tools ||
-            'mutect2_single' in tools ||
-            'gen_somatic_pon' in tools)
+    when: params.known_indels
+        // ('haplotypecaller' in tools || 
+        //     'mutect2' in tools ||
+        //     'mutect2_single' in tools ||
+        //     'gen_somatic_pon' in tools)
 
     script:
     input = recal.collect{"-I ${it}"}.join(' ')
@@ -2435,11 +2455,11 @@ process ApplyBQSR {
     output:
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.bam")
 
-    when: params.known_indels &&
-        ('haplotypecaller' in tools || 
-        'mutect2' in tools ||
-        'mutect2_single' in tools ||
-        'gen_somatic_pon' in tools)
+    when: params.known_indels
+        // ('haplotypecaller' in tools || 
+        // 'mutect2' in tools ||
+        // 'mutect2_single' in tools ||
+        // 'gen_somatic_pon' in tools)
 
     script:
     prefix = params.no_intervals ? "" : "${intervalBed.baseName}_"
@@ -2895,15 +2915,12 @@ process ConcatVCF {
     // we have this funny *_* pattern to avoid copying the raw calls to publishdir
         // tuple variantCaller, idPatient, idSample, file("*_*.vcf.gz"), file("*_*.vcf.gz.tbi"), emit: concatenated_vcf_with_index
         // tuple variantCaller, idPatient, idSample, file("*_*.vcf.gz"), emit: concatenated_vcf_without_index
-        tuple variantCaller, idPatient, idSample, file("${outFile}.gz"), file("${outFile}.gz.tbi"), emit: concatenated_vcf_with_index
-        tuple variantCaller, idPatient, idSample, file("${outFile}.gz"), emit: concatenated_vcf_without_index
+        tuple variantCaller, idPatient, idSample, file("${outFile}.gz"), 
+            file("${outFile}.gz.tbi"), emit: concatenated_vcf_with_index
 
-    // when: ('haplotypecaller' in tools || \
-    //         'mutect2' in tools || \
-    //         'mutect2_single' in tools || \
-    //         'freebayes' in tools
-    //         )
-
+        tuple variantCaller, idPatient, idSample, file("${outFile}.gz"), 
+            emit: concatenated_vcf_without_index
+            
     script:
     outFile =  "${output_file_prefix}_${idSample}.${output_file_ext}"
     options = params.target_bed ? "-t ${targetBED}" : ""
@@ -3635,7 +3652,8 @@ process Mutect2Single{
     label 'cpus_16'
 
     input:
-        tuple idPatient, idSample, file(bam), file(bai), file(intervalBed)
+        tuple idPatient, idSample, file(bam), file(bai), 
+            file(intervalBed)
         file(fasta)
         file(fastaFai)
         file(dict)
@@ -3648,7 +3666,8 @@ process Mutect2Single{
     script:
     out_vcf = "${intervalBed.baseName}_${idSample}.vcf"
     """
-    # max-mnp-distance is set to 0 to avoid a bug in next process GenomicsDbImport
+    # max-mnp-distance is set to 0 to avoid a bug in 
+    # next process GenomicsDbImport
     # See https://gatk.broadinstitute.org/hc/en-us/articles/360046224491-CreateSomaticPanelOfNormals-BETA-
     
     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
@@ -3736,43 +3755,235 @@ process CreateSomaticPON{
 
 /*
 ================================================================================
-                                     Mutect2 
+                                     Mutect2 (Tumor/Normal Mode)
 ================================================================================
 */
 
-process Mutect2{
-    tag {idSample + "-" + intervalBed.baseName}
-    label 'cpus_16'
+// process Mutect2{
+//     tag {idSampleTumor + "_vs_" + idSampleNormal + "-" + intervalBed.baseName}
+//     label 'cpus_2'
 
-    input:
-        tuple idPatient, idSample,file(bam), file(bai), file(intervalBed)
-        file(dict)
-        file(fasta)
-        file(fastaFai)
-        file(germlineResource)
-        file(germlineResourceIndex)
-    output:
-        tuple idPatient,
-            val("${idSampleTumor}_vs_${idSampleNormal}"),
-            file("${intervalBed.baseName}_${idSample}.vcf")
-        // tuple idPatient,
-        //     idSampleTumor,
-        //     idSampleNormal,
-        //     file("${intervalBed.baseName}_${idSample}.vcf.stats") optional true
+//     input:
+//         tuple idPatient, 
+//             idSampleNormal, file(bamNormal), file(baiNormal),
+//             idSampleTumor, file(bamTumor), file(baiTumor), 
+//             file(intervalBed)
+//         file(fasta)
+//         file(fastaFai)
+//         file(dict)
+//         file(germlineResource)
+//         file(germlineResourceIndex)
+//         file(ponSomatic)
+//         file(ponSomaticIndex)
 
-    // when: 'mutect2_single' in tools
+//     output:
+//         tuple 
+//             val("Mutect2"), 
+//             idPatient,
+//             val("${idSampleTumor}_vs_${idSampleNormal}"),
+//             file("${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf")
+        
+//         tuple 
+//             idPatient,
+//             idSampleTumor,
+//             idSampleNormal,
+//             file("${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf.stats") optional true
 
-    """
-    # Get raw calls
-    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
-      Mutect2 \
-      -R ${fasta} \
-      -I ${bam}  \
-      -L ${intervalBed} \
-      --germline-resource ${germlineResource} \
-      -O ${intervalBed.baseName}_${idSample}.vcf
-    """
-}
+//     when: 'mutect2' in tools
+
+//     script:
+//     // please make a panel-of-normals, using at least 40 samples
+//     // https://gatkforums.broadinstitute.org/gatk/discussion/11136/how-to-call-somatic-mutations-using-gatk4-mutect2
+//     PON = params.pon_somatic ? "--panel-of-normals ${ponSomatic}" : ""
+//     """
+//     # Get raw calls
+//     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+//       Mutect2 \
+//       -R ${fasta}\
+//       -I ${bamTumor}  -tumor ${idSampleTumor} \
+//       -I ${bamNormal} -normal ${idSampleNormal} \
+//       -L ${intervalBed} \
+//       --germline-resource ${germlineResource} \
+//       ${PON} \
+//       -O ${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf
+//     """
+// }
+
+// // STEP GATK MUTECT2.2 - MERGING STATS
+
+// process MergeMutect2Stats {
+//     label 'cpus_16'
+//     tag {idSampleTumor + "_vs_" + idSampleNormal}
+
+//     publishDir "${params.outdir}/VariantCalling/${idSampleTumor}_vs_${idSampleNormal}/Mutect2", mode: params.publishDirMode
+
+//     input:
+//         // tuple caller, idPatient, idSampleTumor_vs_idSampleNormal, file(vcfFiles) // corresponding small VCF chunks
+//         tuple idPatient, idSampleTumor, idSampleNormal, file(statsFiles)// the actual stats files
+//         // file(dict)
+//         // file(fasta)
+//         // file(fastaFai)
+//         // file(germlineResource)
+//         // file(germlineResourceIndex)
+//         // file(intervals) from ch_intervals
+
+//     output:
+//         // tuple idPatient,
+//         //     val("${idSampleTumor}_vs_${idSampleNormal}"),
+//         file("${idSampleTumor_vs_idSampleNormal}.vcf.gz.stats")
+
+//     when: 'mutect2' in tools
+
+//     script:     
+//       stats = statsFiles.collect{ "-stats ${it} " }.join(' ')
+//     """
+//     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+//         MergeMutectStats \
+//         ${stats} \
+//         -O ${idSampleTumor}_vs_${idSampleNormal}.vcf.gz.stats
+//     """
+// } // end of MergeMutect2Stats
+
+// // STEP GATK MUTECT2.3 - GENERATING PILEUP SUMMARIES
+
+// process PileupSummariesForMutect2 {
+//     tag {idSampleTumor + "_vs_" + idSampleNormal + "_" + intervalBed.baseName }
+//     label 'cpus_1'
+
+//     input:
+//         tuple idPatient, 
+//             idSampleNormal, file(bamNormal), file(baiNormal), 
+//             idSampleTumor, file(bamTumor), file(baiTumor), 
+//             file(intervalBed)
+        
+//         // set idPatient, idSampleNormal, idSampleTumor, file(statsFile) from intervalStatsFiles
+//         file(germlineResource)
+//         file(germlineResourceIndex)
+
+//     output:
+//         tuple idPatient,
+//             idSampleTumor,
+//             file("${intervalBed.baseName}_${idSampleTumor}_pileupsummaries.table")
+
+//     when: 'mutect2' in tools && params.pon
+
+//     script:
+//     """
+//     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+//         GetPileupSummaries \
+//         -I ${bamTumor} \
+//         -V ${germlineResource} \
+//         -L ${intervalBed} \
+//         -O ${intervalBed.baseName}_${idSampleTumor}_pileupsummaries.table
+//     """
+// } // end of PileupSummariesForMutect2
+
+// // STEP GATK MUTECT2.4 - MERGING PILEUP SUMMARIES
+
+// process MergePileupSummaries {
+//     label 'cpus_1'
+
+//     tag {idPatient + "_" + idSampleTumor}
+
+//     publishDir "${params.outdir}/VariantCalling/${idSampleTumor}/Mutect2", mode: params.publishDirMode
+
+//     input:
+//         tuple idPatient, idSampleTumor, file(pileupSums)
+//         file(dict)
+
+//     output:
+//         file("${idSampleTumor}_pileupsummaries.table.tsv")
+
+//     when: 'mutect2' in tools
+//     script:
+//         allPileups = pileupSums.collect{ "-I ${it} " }.join(' ')
+//     """
+//     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+//         GatherPileupSummaries \
+//         --sequence-dictionary ${dict} \
+//         ${allPileups} \
+//         -O ${idSampleTumor}_pileupsummaries.table.tsv
+//     """
+// }
+
+// // STEP GATK MUTECT2.5 - CALCULATING CONTAMINATION
+
+// process CalculateContamination {
+//     label 'cpus_1'
+
+//     tag {idSampleTumor + "_vs_" + idSampleNormal}
+
+//     publishDir "${params.outdir}/VariantCalling/${idSampleTumor}/Mutect2", mode: params.publishDirMode
+
+//     input:
+//         // tuple idPatient, 
+//         //     idSampleNormal, file(bamNormal), file(baiNormal), 
+//         //     idSampleTumor, file(bamTumor), file(baiTumor) from pairBamCalculateContamination 
+//         file("${idSampleTumor}_pileupsummaries.table")
+  
+//     output:
+//         file("${idSampleTumor}_contamination.table") into contaminationTable
+
+//     when: 'mutect2' in tools && params.pon
+
+//     script:     
+//     """
+//     # calculate contamination
+//     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+//         CalculateContamination \
+//         -I ${idSampleTumor}_pileupsummaries.table \
+//         -O ${idSampleTumor}_contamination.table
+//     """
+// }
+
+// // STEP GATK MUTECT2.6 - FILTERING CALLS
+
+// process FilterMutect2Calls {
+//     label 'cpus_1'
+
+//     tag {idSampleTN}
+
+//     publishDir "${params.outdir}/VariantCalling/${idSampleTN}/${variantCaller}", mode: params.publishDirMode
+
+//     input:
+//         // tuple variantCaller, 
+//         //     idPatient, idSampleTN, file(unfiltered), file(unfilteredIndex),
+//         //     file("${idSampleTN}.vcf.gz.stats"),
+//         //     file("${idSampleTN}_contamination.table")
+//         tuple variantCaller, 
+//             idPatient, idSampleTN, file(unfiltered), file(unfilteredIndex)
+//         file("${idSampleTN}.vcf.gz.stats")
+//         file("${idSampleTN}_contamination.table")
+        
+//         file(dict)
+//         file(fasta)
+//         file(fastaFai)
+//         file(germlineResource)
+//         file(germlineResourceIndex)
+//         // file(intervals) from ch_intervals
+        
+//     output:
+//         tuple val("Mutect2"), idPatient, idSampleTN,
+//             file("filtered_${variantCaller}_${idSampleTN}.vcf.gz"),
+//             file("filtered_${variantCaller}_${idSampleTN}.vcf.gz.tbi"),
+//             file("filtered_${variantCaller}_${idSampleTN}.vcf.gz.filteringStats.tsv")
+
+//     // when: 'mutect2' in tools && params.pon
+//     when: 'mutect2' in tools
+
+//     script:
+//     """
+//     # do the actual filtering
+//     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+//         FilterMutectCalls \
+//         -V ${unfiltered} \
+//         --contamination-table ${idSampleTN}_contamination.table \
+//         --stats ${idSampleTN}.vcf.gz.stats \
+//         -R ${fasta} \
+//         -O filtered_${variantCaller}_${idSampleTN}.vcf.gz
+//     """
+// }
+
 
 /*
 ================================================================================
