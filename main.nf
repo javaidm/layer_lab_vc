@@ -154,6 +154,8 @@ ch_read_count_pon = params.read_count_pon ? Channel.value(file(params.read_count
 ch_somatic_pon = params.somatic_pon ? Channel.value(file(params.somatic_pon)) : "null"
 ch_somatic_pon_index = params.somatic_pon_index ? Channel.value(file(params.somatic_pon_index)) : "null"
 ch_target_bed = params.target_bed ? Channel.value(file(params.target_bed)) : "null"
+// padded target, if specified also generate CollectHsMetrics for the recal bams intersected with the padded bed
+ch_padded_target_bed = params.padded_target_bed ? Channel.value(file(params.padded_target_bed)) : "null"
 ch_bait_bed = params.bait_bed ? Channel.value(file(params.bait_bed)) : "null"
 // knownIndels is currently a list of file for smallGRCh37, so transform it in a channel
 li_known_indels = []
@@ -324,12 +326,13 @@ workflow wf_merge_mapped_reads{
 
         MergeBamMapped(multiple_bams)
         
-        merged_bams = Channel.empty()
-        merged_bams = MergeBamMapped.out.mix(single_bams)
-        IndexBamFile(merged_bams)
+        _merged_bams = Channel.empty()
+        _merged_bams = MergeBamMapped.out.mix(single_bams)
+        IndexBamFile(_merged_bams)
         
+
         // Creating a TSV file to restart from this step
-        merged_bams
+        _merged_bams
         .map { idPatient, idSample, bamFile ->
             status = statusMap[idPatient, idSample]
             gender = genderMap[idPatient]
@@ -343,7 +346,7 @@ workflow wf_merge_mapped_reads{
         )
         // if params.filter_bams is present, generate the relevant bam as well
         if (params.filter_bams){
-            merged_bams
+            _merged_bams
             .map { idPatient, idSample, bamFile ->
                 status = statusMap[idPatient, idSample]
                 gender = genderMap[idPatient]
@@ -357,6 +360,7 @@ workflow wf_merge_mapped_reads{
         // exit 1, 'leaving early!'
     emit:
         merged_bams = IndexBamFile.out
+        merged_bams_qc = _merged_bams
 } // end of wf_map_reads
 
 workflow wf_qc_filter_mapped_reads{
@@ -501,8 +505,13 @@ workflow wf_recal_bams{
         MergeBamRecal(bam_merge_bam_recal)
         // When not using intervals, just index the bam coming from ApplyBQSR
         IndexBamRecal(bam_merge_bam_recal)
+    
         bam_recal = MergeBamRecal.out.bam_recal.mix(IndexBamRecal.out.bam_recal)
         bam_recal_qc = MergeBamRecal.out.bam_recal_qc.mix(IndexBamRecal.out.bam_recal_qc)
+        
+        BamRecalOnTarget(bam_recal,
+                         ch_padded_target_bed)
+        
         // Creating a TSV file to restart from this step
         bam_recal.map { idPatient, idSample, bamFile, baiFile ->
             gender = genderMap[idPatient]
@@ -529,10 +538,14 @@ workflow wf_recal_bams{
         // tuple idPatient, idSample, file("${idSample}.recal.bam"), emit: bam_recal_qc
         bam_recal = bam_recal
         bam_recal_qc = bam_recal_qc
+        bam_recal_on_target_qc = BamRecalOnTarget.out.bam_recal_on_target_qc
 } // end of wf_recal_bams
 
 workflow wf_qc_recal_bams{
+
+    take: _bam_raw_qc // tuple idPatient, idSample, file(bam), file(bam // take the raw bams
     take: _bam_recal_qc // tuple idPatient, idSample, file(bam)
+    take: _bam_recal_on_target_qc // tuple idPatient, idSample, file(bam)
     take: _target_bed
     take: _bait_bed
     take: _fasta
@@ -540,6 +553,7 @@ workflow wf_qc_recal_bams{
     take: _dict
 
     main:
+        // _bam_raw_qc.dump(tag: 'raw_bam_qc: ')
         SamtoolsStats(_bam_recal_qc)
         CollectAlignmentSummaryMetrics(
             _bam_recal_qc,
@@ -550,14 +564,33 @@ workflow wf_qc_recal_bams{
         CollectInsertSizeMetrics(
              _bam_recal_qc
         )
+        /* Now for Rebecca's on-target assessment quality metric, 
+            we need to run CollectHSMetrics on three type of bams
+           
+           a) Raw, unmarked, un-recalibrared bams
+           b) quality filtered, marked duplicated, reclaibrated bams
+           c) bams in above step 'b' intersected with the targets_bed to get the on-target bams
+
+           Skip it if user has specified on_target_assessment in skip_qc param
+        */
+        _bam_collect_hs_metrics = _bam_recal_qc
+        if (!('on_target_assessment' in skipQC)){
+            _bam_collect_hs_metrics = _bam_collect_hs_metrics
+                                       .mix(_bam_raw_qc) 
+            _bam_collect_hs_metrics = _bam_collect_hs_metrics
+                                    .mix(_bam_recal_on_target_qc)
+        }
+                                    
+        
 
         CollectHsMetrics(
-            _bam_recal_qc,
+            _bam_collect_hs_metrics,
             _fasta,
             _fasta_fai,
             _dict,
             _target_bed,
             _bait_bed,
+            // '' // this is the suffix to the output file
         )
         BamQC(
             _bam_recal_qc,
@@ -1307,7 +1340,7 @@ workflow{
     )
 
     wf_recal_bams(
-            wf_mark_duplicates.out.dm_bams,
+            wf_mark_duplicates.out.dm_bams, // recalibrated bams
             ch_bed_intervals,
             ch_fasta,
             ch_fasta_fai,         
@@ -1324,7 +1357,9 @@ workflow{
     // Run QC metrics generation processes on the recalibrated bams
 
     wf_qc_recal_bams(
+            wf_merge_mapped_reads.out.merged_bams_qc, // raw, unmarked, un-recalibrated bams
             wf_recal_bams.out.bam_recal_qc,
+            wf_recal_bams.out.bam_recal_on_target_qc,
             ch_target_bed,
             ch_bait_bed,
             ch_fasta,
@@ -2328,6 +2363,8 @@ process IndexBamFile {
 //     """
 // }
 
+
+
 process MarkDuplicates {
     label 'cpus_max'
     tag {idPatient + "-" + idSample}
@@ -2500,6 +2537,31 @@ process MergeBamRecal {
     samtools index ${idSample}.recal.bam
     """
 }
+
+process BamRecalOnTarget {
+    label 'cpus_32'
+
+    tag {idPatient + "-" + idSample}
+
+    publishDir "${params.outdir}/Preprocessing/${idSample}/RecalibratedOnTarget", mode: params.publish_dir_mode
+
+    input:
+        tuple idPatient, idSample, file("${idSample}.recal.bam"), file("${idSample}.recal.bam.bai")
+        file(paddedTargetBed)
+
+    output:
+        tuple idPatient, idSample, file("${idSample}.recal.on_target.bam"), file("${idSample}.recal.on_target.bam.bai"), emit: bam_recal_on_target
+        tuple idPatient, idSample, file("${idSample}.recal.on_target.bam"), emit: bam_recal_on_target_qc
+        
+    when: params.padded_target_bed && !('on_target_assessment' in skipQC)
+
+    script:
+    """
+    bedtools intersect -a ${idSample}.recal.bam -b ${paddedTargetBed} > ${idSample}.recal.on_target.bam
+    samtools index ${idSample}.recal.on_target.bam
+    """
+}
+
 // STEP 4.5': INDEXING THE RECALIBRATED BAM FILES
 
 process IndexBamRecal {
@@ -2523,6 +2585,8 @@ process IndexBamRecal {
     samtools index ${idSample}.recal.bam
     """
 }
+
+
 
 // STEP 5: QC
 
@@ -2647,9 +2711,11 @@ process CollectHsMetrics{
     file(dict)
     file(targetBED)
     file(baitBED)
+    // val (output_suffix)
 
     output:
-    file("${bam.baseName}_hs_metrics.txt")
+    file("${bam.baseName}.txt")
+    // file("${bam.baseName}_${output_suffix}.txt")
     
     
     when: !('hs_metrics' in skipQC) && params.bait_bed
@@ -2660,7 +2726,7 @@ process CollectHsMetrics{
 
     gatk --java-options -Xmx32G CollectHsMetrics --VALIDATION_STRINGENCY LENIENT \
     -I ${bam} \
-    -O ${bam.baseName}_hs_metrics.txt \
+    -O ${bam.baseName}.txt \
     -TI target.interval_list \
     -BI bait.interval_list \
     -R ${fasta}
@@ -4466,6 +4532,7 @@ def defineSkipQClist() {
         'multiqc',
         'samtools',
         'hs_metrics',
+        'on_target_assessment',
         'sentieon',
         'vcftools',
         'versions'
