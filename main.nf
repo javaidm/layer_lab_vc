@@ -1613,6 +1613,9 @@ def helpMessage() {
         --nucleotides_per_second      To estimate interval size
                                     Default: 1000.0
         --target_bed                Target BED file (aka primary/regions/empirical) for targeted  or whole exome sequencing
+        --padded_target_bed         Target BED with extra padding that is used to calculate on_target assessment by intersecting 
+                                    Recalibrated bams on these regions, and then passing through Picard CollectHsMetrics and 
+                                    in conjunction to running CollectHsMetrics on Raw unmarked bams and marked recalibrated bams
         --bait_bed                  Bait BED file (aka covered/captured) for targeted or whole exome sequencing (used for GATK CollectHsMetrics)
         --step                      Specify starting step
                                     Available: Mapping, Recalibrate, VariantCalling, Annotate
@@ -4405,6 +4408,7 @@ def printSummary(){
     summary['Script dir']        = workflow.projectDir
     summary['User']              = workflow.userName
     summary['genome']            = params.genome
+    if (params.genomes_base)            summary['genomes base dir']   = params.genomes_base
 
     if (params.fasta)                 summary['fasta']                 = params.fasta
     if (params.fasta_fai)              summary['fasta_fai']              = params.fasta_fai
