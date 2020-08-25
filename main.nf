@@ -126,12 +126,6 @@ params.known_indels = params.genome && ( 'mapping' in step || 'markdups' in step
 
 params.known_indels_index = params.genome && params.known_indels ? params.genomes[params.genome].known_indels_index ?: null : null
 
-// Initialize channels based on params
-// ch_acLoci = params.ac_loci && 'ascat' in tools ? Channel.value(file(params.ac_loci)) : "null"
-// ch_acLociGC = params.ac_lociGC && 'ascat' in tools ? Channel.value(file(params.ac_lociGC)) : "null"
-// ch_chrDir = params.chr_dir && 'controlfreec' in tools ? Channel.value(file(params.chr_dir)) : "null"
-// ch_chrLength = params.chr_length && 'controlfreec' in tools ? Channel.value(file(params.chr_length)) : "null"
-// ch_dbsnp = params.dbsnp && ('mapping' in step || 'controlfreec' in tools || 'haplotypecaller' in tools || 'mutect2' in tools) ? Channel.value(file(params.dbsnp)) : "null"
 
 ch_acLoci = params.ac_loci && 'ascat' in tools ? Channel.value(file(params.ac_loci)) : "null"
 ch_acLoci_GC = params.ac_loci_GC && 'ascat' in tools ? Channel.value(file(params.ac_loci_GC)) : "null"
@@ -298,6 +292,19 @@ workflow wf_partition_fastq{
     emit:
         pair_reads = _pair_reads
 } // end of wf_partition_fastq
+
+workflow wf_fastqc_fq{
+    take: _input_samples
+    main:
+        out_ch = Channel.empty()
+        if (step == 'mapping'){
+            FastQCFQ(_input_samples)
+            out_ch = FastQCFQ.out
+        }
+    
+    emit:
+        fastqc_reports = out_ch
+} // end of wf_fastqc_fq
 
 workflow wf_merge_mapped_reads{
     
@@ -1284,7 +1291,9 @@ workflow{
     wf_partition_fastq()
     ch_input_pair_reads = wf_partition_fastq.out.pair_reads
 
-    FastQCFQ(ch_input_sample)     
+    
+    // FastQCFQ(ch_input_sample)     
+    wf_fastqc_fq(ch_input_sample)
     MapReads(
         ch_input_pair_reads, 
             ch_fasta,
@@ -1486,14 +1495,14 @@ workflow{
         ch_dbsnp_index
     )
 
-    wf_hap_py(
-        wf_deepvariant.out.vcf,
-        wf_genotype_gvcf.out.vcfs_with_indexes,
-        ch_target_bed,
-        ch_bait_bed,
-          ch_fasta,
-        ch_fasta_fai
-    )
+    // wf_hap_py(
+    //     wf_deepvariant.out.vcf,
+    //     wf_genotype_gvcf.out.vcfs_with_indexes,
+    //     ch_target_bed,
+    //     ch_bait_bed,
+    //       ch_fasta,
+    //     ch_fasta_fai
+    // )
     
     wf_germline_cnv(
         wf_recal_bams.out.bam_recal,
@@ -1518,7 +1527,7 @@ workflow{
 
     wf_multiqc(
         wf_get_software_versions.out,
-        FastQCFQ.out.collect().ifEmpty([]),
+        wf_fastqc_fq.out.fastqc_reports.collect().ifEmpty([]),
         wf_qc_recal_bams.out.bam_qc,
         wf_vcf_stats.out.bcfootls_stats,
         wf_vcf_stats.out.vcfootls_stats,
@@ -2062,6 +2071,7 @@ process FastQCFQ {
         file("*.{html,zip}")
 
     when: !('fastqc' in skipQC) && (step == 'mapping')
+    // when: !('fastqc' in skipQC) && !(step in ['markdups','recalibrate', 'variantcalling', 'annotate'])
     
     script:
     """
@@ -2089,7 +2099,7 @@ process MapReads {
         tuple idPatient, idSample, idRun, file("${idSample}_${idRun}.bam"), emit : bam_mapped
         tuple idPatient, val("${idSample}_${idRun}"), file("${idSample}_${idRun}.bam"), emit : bam_mapped_BamQC
     
-    when: !(step in ['recalibrate', 'variantcalling', 'annotate'])
+    when: !(step in ['markdups','recalibrate', 'variantcalling', 'annotate'])
     script:
     // -K is an hidden option, used to fix the number of reads processed by bwa mem
     // Chunk size can affect bwa results, if not specified,
@@ -2416,11 +2426,11 @@ process BaseRecalibrator {
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.table")
         // set idPatient, idSample into recalTableTSVnoInt
 
-    when: params.known_indels  
-        // ('haplotypecaller' in tools || 
-        // 'mutect2' in tools ||
-        // 'mutect2_single' in tools ||
-        // 'gen_somatic_pon' in tools)
+    when: params.known_indels  &&
+        ('haplotypecaller' in tools || 
+        'mutect2' in tools ||
+        'mutect2_single' in tools ||
+        'gen_somatic_pon' in tools)
 
     script:
     dbsnpOptions = params.dbsnp ? "--known-sites ${dbsnp}" : ""
@@ -2460,11 +2470,11 @@ process GatherBQSRReports {
         tuple idPatient, idSample, file("${idSample}.recal.table"), emit: recal_table
         // set idPatient, idSample into recalTableTSV
 
-    when: params.known_indels
-        // ('haplotypecaller' in tools || 
-        //     'mutect2' in tools ||
-        //     'mutect2_single' in tools ||
-        //     'gen_somatic_pon' in tools)
+    when: params.known_indels &&
+        ('haplotypecaller' in tools || 
+            'mutect2' in tools ||
+            'mutect2_single' in tools ||
+            'gen_somatic_pon' in tools)
 
     script:
     input = recal.collect{"-I ${it}"}.join(' ')
@@ -2495,11 +2505,11 @@ process ApplyBQSR {
     output:
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.bam")
 
-    when: params.known_indels
-        // ('haplotypecaller' in tools || 
-        // 'mutect2' in tools ||
-        // 'mutect2_single' in tools ||
-        // 'gen_somatic_pon' in tools)
+    when: params.known_indels && 
+        ('haplotypecaller' in tools || 
+        'mutect2' in tools ||
+        'mutect2_single' in tools ||
+        'gen_somatic_pon' in tools)
 
     script:
     prefix = params.no_intervals ? "" : "${intervalBed.baseName}_"
@@ -4770,7 +4780,8 @@ def extractRecal(tsvFile) {
 
         def trimmed = line.trim()
         def cols = trimmed.split()
-        checkNumberOfItem(cols, 7)
+        // checkNumberOfItem(cols, 7)
+        checkNumberOfItem(cols, 6)
 
         info("cols[0]:${cols[0]}")
         info("cols[1]:${cols[1]}")
@@ -4778,7 +4789,7 @@ def extractRecal(tsvFile) {
         info("cols[3]:${cols[3]}")
         info("cols[4]:${cols[4]}")
         info("cols[5]:${cols[5]}")
-        info("cols[6]:${cols[6]}")
+        // info("cols[6]:${cols[6]}")
 
         def idPatient  = cols[0]
         def gender     = cols[1]
@@ -4786,13 +4797,14 @@ def extractRecal(tsvFile) {
         def idSample   = cols[3]
         def bamFile   = returnFile(cols[4])
         def baiFile   = returnFile(cols[5])
-        def recalTable = returnFile(row[6])
+        // def recalTable = returnFile(row[6])
 
             if (!hasExtension(bamFile, "bam")) exit 1, "File: ${bamFile} has the wrong extension. See --help for more information"
             if (!hasExtension(baiFile, "bai")) exit 1, "File: ${baiFile} has the wrong extension. See --help for more information"
-            if (!hasExtension(recalTable, "recal.table")) exit 1, "File: ${recalTable} has the wrong extension. See --help for more information"            
+            // if (!hasExtension(recalTable, "recal.table")) exit 1, "File: ${recalTable} has the wrong extension. See --help for more information"            
 
-        infos.add([idPatient, gender, status, idSample, bamFile, baiFile, recalTable])
+        // infos.add([idPatient, gender, status, idSample, bamFile, baiFile, recalTable])
+        infos.add([idPatient, gender, status, idSample, bamFile, baiFile])
     }
     return Channel.from(infos)
 }
