@@ -59,8 +59,8 @@ if (tsvPath) {
     tsvFile = file(tsvPath)
     switch (step) {
         case 'mapping': ch_input_sample = extractFastq(tsvFile); break
-        case 'markdups': ch_input_sample = extractMarkDups(tsvFile); break
-        case 'recalibrate': ch_input_sample = extractRecal(tsvFile); break
+        case 'markdups': ch_input_sample = extractUnmarked(tsvFile); break
+        case 'recalibrate': ch_input_sample = extractDupMarked(tsvFile); break
         case 'variantcalling': ch_input_sample = extractBam(tsvFile); break
         case 'annotate': break
         default: exit 1, "Unknown step ${step}"
@@ -808,23 +808,44 @@ workflow wf_mutect2_single{
         // group scattered vcf's (per interval) by the 
         // idPatient, and idSample
 
-        _concat_vcf = Mutect2Single.out
+        _concat_vcf = Mutect2Single.out.vcf
                       .groupTuple(by: [0, 1])
                       
         _concat_vcf = Channel.from('Mutect2_single')
                       .combine(_concat_vcf)
                     //   .dump(tag: 'vcf_concat_vcf')
+        
         ConcatVCF(
             _concat_vcf,
             _fasta_fai,
             _target_bed,
-            'Mu2_single', // prefix for output files
+            'Mu2_single_unfiltered', // prefix for output files
             'vcf', // extension for the output files
-            'Mutect2_single_mode' // output directory name
+            'Mutect2_single_mode_unfiltered' // output directory name
             )
+        // Now merge the stats together (groupby [idPatient, idSample])
+         _merge_stats = Mutect2Single.out.stats
+                      .groupTuple(by: [0, 1])
+
+        MergeMutect2SingleStats(_merge_stats)
+        // Now group per sample vcfs with correcsponding stats
+        // remove the variant caller lable
+        _concatenated_vcf = ConcatVCF.out.concatenated_vcf_with_index
+                            .map{variantCaller, idPatient, idSample, vcf, tbi ->
+                            [idPatient, idSample, vcf, tbi]}
+        // join operator will join vcfs with their corresponding stats on the 
+        // matching key [idPatient, idSample]
+        _vcf_for_filtering = _concatenated_vcf
+                            .join(MergeMutect2SingleStats.out, by:[0,1])
+        FilterMutect2SingleCalls(_vcf_for_filtering,
+                                 _fasta,
+                                 _fasta_fai,
+                                 _dict,
+                                 _germline_resource,
+                                 _germline_resource_index)
+
     emit:
-        vcf = ConcatVCF.out.concatenated_vcf_with_index
-        vcf_without_index = ConcatVCF.out.concatenated_vcf_without_index
+        vcf = FilterMutect2SingleCalls.out
 } // end of wf_mutect2_single
 
 workflow wf_somatic_pon{
@@ -1381,8 +1402,13 @@ workflow{
     // separate BAM by status
     // bamNormal = Channel.empty()
     // bamTumor = Channel.empty ()
+    ch_bams = Channel.empty()
+    if (step == 'variantcalling'){
+       ch_bams = ch_input_sample 
+    }
+
     (bam_normal, bam_tumor) = 
-        wf_recal_bams.out.bam_recal.branch{
+        ch_bams.branch{
             _:  statusMap[it[0], it[1]] == 0
             __: statusMap[it[0], it[1]] == 1
         }
@@ -1396,10 +1422,10 @@ workflow{
     // For generating a somatic pon, we only need normal bams.
     // When running mutect2_single without the intent of generating a somatic_pon,
     // run it on all bams (tumors plus normals)
-
+    
     ch_int_mutec2_single_bams = Channel.empty()
     if ('mutect2_single' in tools ) // use all bams (normal plus tumor)
-        ch_int_mutec2_single_bams = wf_recal_bams.out.bam_recal.combine(ch_bed_intervals)
+        ch_int_mutec2_single_bams = ch_bams.combine(ch_bed_intervals)
     else if ('gen_somatic_pon' in tools && !('mutect2_single' in tools)) // use normal only
         ch_int_mutec2_single_bams = bam_normal.combine(ch_bed_intervals)
     // ch_int_mutec2_single_bams.dump(tag: 'ch_int_mutec2_single_bams: ')
@@ -2426,7 +2452,7 @@ process BaseRecalibrator {
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.table")
         // set idPatient, idSample into recalTableTSVnoInt
 
-    when: params.known_indels  &&
+    when: params.known_indels  && step != 'variantcalling' &&
         ('haplotypecaller' in tools || 
         'mutect2' in tools ||
         'mutect2_single' in tools ||
@@ -2470,7 +2496,7 @@ process GatherBQSRReports {
         tuple idPatient, idSample, file("${idSample}.recal.table"), emit: recal_table
         // set idPatient, idSample into recalTableTSV
 
-    when: params.known_indels &&
+    when: params.known_indels  && step != 'variantcalling' &&
         ('haplotypecaller' in tools || 
             'mutect2' in tools ||
             'mutect2_single' in tools ||
@@ -2505,7 +2531,7 @@ process ApplyBQSR {
     output:
         tuple idPatient, idSample, file("${prefix}${idSample}.recal.bam")
 
-    when: params.known_indels && 
+    when: params.known_indels  && step != 'variantcalling' &&
         ('haplotypecaller' in tools || 
         'mutect2' in tools ||
         'mutect2_single' in tools ||
@@ -3740,10 +3766,14 @@ process Mutect2Single{
         file(germlineResourceIndex)
 
     output:
-        tuple idPatient, idSample, file(out_vcf)
-
+        tuple idPatient, idSample, file(out_vcf), emit: vcf
+        tuple idPatient, idSample, file(out_stats) , emit: stats
+    
+    when: 'mutect2_single' in tools
+    
     script:
     out_vcf = "${intervalBed.baseName}_${idSample}.vcf"
+    out_stats = "${intervalBed.baseName}_${idSample}.vcf.stats"
     """
     # max-mnp-distance is set to 0 to avoid a bug in 
     # next process GenomicsDbImport
@@ -3759,6 +3789,73 @@ process Mutect2Single{
       -O ${out_vcf}
     """
 }
+
+process MergeMutect2SingleStats {
+    label 'cpus_16'
+    tag {idSample}
+
+    // publishDir "${params.outdir}/VariantCalling/${idSampleTumor}_vs_${idSampleNormal}/Mutect2", mode: params.publishDirMode
+
+    input:
+        tuple idPatient, idSample, file(statsFiles)// the actual stats files
+
+    output:
+        tuple idPatient, idSample, file("${idSample}.vcf.gz.stats")
+
+    when: 'mutect2_single' in tools
+
+    script:     
+      stats = statsFiles.collect{ "-stats ${it} " }.join(' ')
+    """
+    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+        MergeMutectStats \
+        ${stats} \
+        -O ${idSample}.vcf.gz.stats
+    """
+} // end of MergeMutect2SingleStats
+
+
+process FilterMutect2SingleCalls {
+    label 'cpus_1'
+
+    tag {idSample}
+
+    publishDir "${params.outdir}/VariantCalling/${idSample}/mutect2_single_filtered", mode: params.publish_dir_mode
+
+    input:
+        tuple   idPatient, 
+                idSample, 
+                file(unfiltered), file(unfilteredIndex),
+                file("${idSample}.vcf.gz.stats")
+        
+        file(fasta)
+        file(fastaFai)
+        file(dict)
+        file(germlineResource)
+        file(germlineResourceIndex)
+        // file(intervals) from ch_intervals
+        
+    output:
+        tuple val("Mutect2Single"), idPatient, idSample,
+            file("mutect2_single_filtered_${idSample}.vcf.gz"),
+            file("mutect2_single_filtered_${idSample}.vcf.gz.tbi"),
+            file("mutect2_single_filtered_${idSample}.vcf.gz.filteringStats.tsv")
+
+    // when: 'mutect2' in tools && params.pon
+     when: 'mutect2_single' in tools
+
+    script:
+    """
+    # do the actual filtering
+    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+        FilterMutectCalls \
+        -V ${unfiltered} \
+        --stats ${idSample}.vcf.gz.stats \
+        -R ${fasta} \
+        -O mutect2_single_filtered_${idSample}.vcf.gz
+    """
+}
+
 
 // STEP GATK GenomicsDBImport
 process SomaticPonGenomicsDBImport {
@@ -4738,7 +4835,7 @@ def extractFastq(tsvFile) {
     return Channel.from(infos)
 }
 
-def extractMarkDups(tsvFile) {
+def extractUnmarked(tsvFile) {
     def infos = []
 
     def allLines = tsvFile.readLines()
@@ -4771,7 +4868,7 @@ def extractMarkDups(tsvFile) {
 }
 
 
-def extractRecal(tsvFile) {
+def extractDupMarked(tsvFile) {
     def infos = []
 
     def allLines = tsvFile.readLines()
