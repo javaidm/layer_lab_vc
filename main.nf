@@ -264,6 +264,7 @@ workflow wf_build_intervals{
         bed_intervals = CreateIntervalBeds.out.flatten()
 }
 
+
 workflow wf_partition_fastq{
     main:
     _pair_reads = Channel.empty()
@@ -306,14 +307,15 @@ workflow wf_fastqc_fq{
         fastqc_reports = out_ch
 } // end of wf_fastqc_fq
 
-workflow wf_merge_mapped_reads{
+workflow wf_gather_mapped_reads{
     
     take:
-        take: bam_mapped
+        take: _bam_mapped
+        take: _bam_suffix
     main:
         // STEP 1.5: MERGING BAM FROM MULTIPLE LANES
         (single_bams, multiple_bams) = 
-        bam_mapped.groupTuple(by:[0, 1])
+        _bam_mapped.groupTuple(by:[0, 1])
         .branch{
             _: it[2].size() == 1
             __: it[2].size() > 1
@@ -328,7 +330,7 @@ workflow wf_merge_mapped_reads{
         // tell the mergeBamMapped to generate the .bams
         multiple_bams = 
         multiple_bams.map{idPatient, idSample, idRun, bams -> 
-            [ idPatient, idSample, idRun, '.bam', bams ]
+            [ idPatient, idSample, idRun, _bam_suffix, bams ]
         }
 
         MergeBamMapped(multiple_bams)
@@ -343,28 +345,15 @@ workflow wf_merge_mapped_reads{
         .map { idPatient, idSample, bamFile ->
             status = statusMap[idPatient, idSample]
             gender = genderMap[idPatient]
-            bam = "${params.outdir}/Preprocessing/${idSample}/Bams/${idSample}.bam"
-            bai = "${params.outdir}/Preprocessing/${idSample}/Bams/${idSample}.bai"
+            bam = "${params.outdir}/Preprocessing/${idSample}/Bams/${idSample}${_bam_suffix}.bam"
+            bai = "${params.outdir}/Preprocessing/${idSample}/Bams/${idSample}${_bam_suffix}.bai"
             bam_file = file(bam)
             bai_file = file(bai)
             "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam_file}\t${bai_file}\n"
         }.collectFile(
-            name: 'mapped_bam.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
+            name: "mapped_bam${_bam_suffix}.tsv", sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
         )
-        // if params.filter_bams is present, generate the relevant bam as well
-        if (params.filter_bams){
-            _merged_bams
-            .map { idPatient, idSample, bamFile ->
-                status = statusMap[idPatient, idSample]
-                gender = genderMap[idPatient]
-                bam = "${params.outdir}/Preprocessing/${idSample}/Bams/${idSample}_pq${params.bam_mapping_q}.bam"
-                bai = "${params.outdir}/Preprocessing/${idSample}/Bams/${idSample}_pq${params.bam_mapping_q}.bai"
-                "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"
-            }.collectFile(
-                name: "mapped_bam_${params.bam_mapping_q}.tsv", sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
-            )   
-        }
-        // exit 1, 'leaving early!'
+
     emit:
         merged_bams = IndexBamFile.out
         merged_bams_qc = _merged_bams
@@ -389,23 +378,78 @@ workflow wf_qc_filter_mapped_reads{
         // Here we filter out seconday and supplemntary reads
         FilterOutSecondaryAndSupplementaryReads(
             MergeFilteredBamReads.out.filtered_bam)
-        filtered_out_bams = FilterOutSecondaryAndSupplementaryReads
-                            .out.filtered_bam
-                            .groupTuple(by:[0, 1])
-                            // .dump(tag: 'qc_bams_for_merging')
+        wf_gather_mapped_reads(
+            FilterOutSecondaryAndSupplementaryReads.out.filtered_bam,
+            "_pq${params.bam_mapping_q}") // we pass an empty string as  the bam name suffix
         
-        // tell the mergeBamMapped to generate the .bams
-        filtered_out_bams = 
-        filtered_out_bams.map{idPatient, idSample, idRun, bams -> 
-            [ idPatient, idSample, idRun, "_pq${params.bam_mapping_q}.bam", bams ]
-        }
-        .dump(tag: 'qc_bams_for_merging')
-        // STEP 1.5: MERGING BAM FROM MULTIPLE LANES
-        MergeBamMapped(filtered_out_bams)
-        IndexBamFile(MergeBamMapped.out)
     emit:
-        merged_bams = IndexBamFile.out
+        merged_bams = wf_gather_mapped_reads.out
 } // end of wf_map_reads
+
+
+workflow wf_map_reads{
+    take: _input_samples
+    take: _fasta
+    take: _fasta_fai
+    take: _bwa_index
+    main:
+        // First see if we need to split the fastqs for parallelization
+        if (params.split_fastq){
+            PartitionFastQ(_input_samples)
+            _input_samples = PartitionFastQ.out
+                .flatMap{            
+                    idPatient, idSample, idRun, reads_1, reads_2 ->
+                    myList= []
+                    reads_1.each { read_1 -> 
+                                    split_index = read_1.fileName.toString().minus("r1_split_").minus(".fastq.gz")
+                                    parent = read_1.parent
+                                    read_2_fn = read_1.fileName.toString().replace("r1_split_", "r2_split_")
+                                    read_2 = "${parent}/${read_2_fn}"
+                                    new_id_run = "${idRun}_${split_index}"
+                                    myList.add([idPatient, idSample, new_id_run, read_1, file(read_2)])
+                                }
+                    myList     
+                }
+        } // end if
+        // At this point we have either the intact fastqs or partitioned ones, 
+        // and we are ready for alignment
+        MapReads(
+            _input_samples, 
+            _fasta,
+            _fasta_fai,
+            _bwa_index
+        )
+        // Now gather these scattered mapped reads
+        wf_gather_mapped_reads(MapReads.out.bam_mapped,
+                                '') // we pass an empty string as  the bam name suffix
+        _out_bams = wf_gather_mapped_reads.out.merged_bams
+        // Now we need to see if we need to filter the raw bams depending upon passed parameter
+        if(params.filter_bams){
+            wf_qc_filter_mapped_reads(MapReads.out.bam_mapped)
+            _out_bams = wf_qc_filter_mapped_reads.out.mreged_bams
+        }
+                              
+    emit:
+        bams_mapped = _out_bams
+        // bams_mapped_qc = _out_bams_qc
+} // end of wf_map_reads
+
+workflow wf_qc_bam_mapped{
+    take: _bams_mapped // tuple idPatient, idSample, file(bam), file(bai)
+    take: _target_bed
+    main:
+        // For the qc, we do not need the bai's
+        _bams_mapped_qc = _bams_mapped.map
+                                { idPatient, idSample, bam, bai -> 
+                                [idPatient, idSample, bam]
+                                }
+        BamQC(
+            _bams_mapped_qc,
+            _target_bed
+        )
+
+    emit: bam_qc = BamQC.out
+}
 
 workflow wf_mark_duplicates{
     take: _bams
@@ -513,46 +557,52 @@ workflow wf_recal_bams{
         // When not using intervals, just index the bam coming from ApplyBQSR
         IndexBamRecal(bam_merge_bam_recal)
     
-        bam_recal = MergeBamRecal.out.bam_recal.mix(IndexBamRecal.out.bam_recal)
-        bam_recal_qc = MergeBamRecal.out.bam_recal_qc.mix(IndexBamRecal.out.bam_recal_qc)
-        
-        BamRecalOnTarget(bam_recal,
-                         ch_padded_target_bed)
+        bams_recal = MergeBamRecal.out.bam_recal.mix(IndexBamRecal.out.bam_recal)
+        // bams_recal_qc = MergeBamRecal.out.bam_recal_qc.mix(IndexBamRecal.out.bam_recal_qc)
+       
         
         // Creating a TSV file to restart from this step
-        bam_recal.map { idPatient, idSample, bamFile, baiFile ->
+        bams_recal.map { idPatient, idSample, bamFile, baiFile ->
             gender = genderMap[idPatient]
             status = statusMap[idPatient, idSample]
             bam = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam"
-            bai = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam.bai"
+            bai = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bai"
             "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"
         }.collectFile(
             name: 'recalibrated.tsv', sort: true, storeDir: "${params.outdir}/Preprocessing/TSV"
         )
-
-        bam_recal
+        // Store tsv's for individual samples as well, so we can run a single sample too
+        bams_recal
             .collectFile(storeDir: "${params.outdir}/Preprocessing/TSV") {
                 idPatient, idSample, bamFile, baiFile ->
                 status = statusMap[idPatient, idSample]
                 gender = genderMap[idPatient]
                 bam = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam"
-                bai = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bam.bai"
+                bai = "${params.outdir}/Preprocessing/${idSample}/Recalibrated/${idSample}.recal.bai"
                 ["recalibrated_${idSample}.tsv", "${idPatient}\t${gender}\t${status}\t${idSample}\t${bam}\t${bai}\n"]
         }
     emit:
-        // output structure
-        // tuple idPatient, idSample, file("${idSample}.recal.bam"), file("${idSample}.recal.bam.bai"), emit: bam_recal
-        // tuple idPatient, idSample, file("${idSample}.recal.bam"), emit: bam_recal_qc
-        bam_recal = bam_recal
-        bam_recal_qc = bam_recal_qc
-        bam_recal_on_target_qc = BamRecalOnTarget.out.bam_recal_on_target_qc
+        bams_recal = bams_recal
+        // bam_recal_qc = bam_recal_qc
+        
 } // end of wf_recal_bams
 
-workflow wf_qc_recal_bams{
 
-    take: _bam_raw_qc // tuple idPatient, idSample, file(bam), file(bam // take the raw bams
-    take: _bam_recal_qc // tuple idPatient, idSample, file(bam)
-    take: _bam_recal_on_target_qc // tuple idPatient, idSample, file(bam)
+workflow wf_recal_bams_on_target{
+    take: _bam_recal
+    take: _padded_target_bed
+    main:
+        BamRecalOnTarget(_bam_recal,
+                         _padded_target_bed)
+    emit:
+        bam_recal_on_target = BamRecalOnTarget.out.bam_recal_on_target
+}
+
+workflow wf_qc_bam_recal{
+
+    // take: _bam_raw_qc // tuple idPatient, idSample, file(bam), file(bam // take the raw bams
+    take: _bams_recal // tuple idPatient, idSample, file(bam), file(bai)
+    take: _bams_recal_on_target // tuple idPatient, idSample, file(bam), file(bai)
     take: _target_bed
     take: _bait_bed
     take: _fasta
@@ -560,32 +610,35 @@ workflow wf_qc_recal_bams{
     take: _dict
 
     main:
+     // For the qc, we do not need the bai's
+        _bams_recal_qc = _bams_recal.map
+                                { idPatient, idSample, bam, bai -> 
+                                [idPatient, idSample, bam]
+                                }
+        
+        _bams_recal_on_target_qc = _bams_recal_on_target.map
+                                { idPatient, idSample, bam, bai -> 
+                                [idPatient, idSample, bam]
+                                }
+
         // _bam_raw_qc.dump(tag: 'raw_bam_qc: ')
-        SamtoolsStats(_bam_recal_qc)
+        SamtoolsStats(_bams_recal_qc)
         CollectAlignmentSummaryMetrics(
-            _bam_recal_qc,
+            _bams_recal_qc,
             _fasta,
             _fasta_fai,
             _dict
         )
         CollectInsertSizeMetrics(
-             _bam_recal_qc
+             _bams_recal_qc
         )
-        /* Now for Rebecca's on-target assessment quality metric, 
-            we need to run CollectHSMetrics on three type of bams
-           
-           a) Raw, unmarked, un-recalibrared bams
-           b) quality filtered, marked duplicated, reclaibrated bams
-           c) bams in above step 'b' intersected with the targets_bed to get the on-target bams
-
+       /*
            Skip it if user has specified on_target_assessment in skip_qc param
         */
-        _bam_collect_hs_metrics = _bam_recal_qc
+        _bam_collect_hs_metrics = _bams_recal_qc
         if (!('on_target_assessment' in skipQC)){
             _bam_collect_hs_metrics = _bam_collect_hs_metrics
-                                       .mix(_bam_raw_qc) 
-            _bam_collect_hs_metrics = _bam_collect_hs_metrics
-                                    .mix(_bam_recal_on_target_qc)
+                                       .mix(_bams_recal_on_target) 
         }
                                     
         
@@ -596,13 +649,10 @@ workflow wf_qc_recal_bams{
             _fasta_fai,
             _dict,
             _target_bed,
-            _bait_bed,
+            _bait_bed
             // '' // this is the suffix to the output file
         )
-        BamQC(
-            _bam_recal_qc,
-            _target_bed
-        )
+       
 
     emit:
         samtools_stats =  SamtoolsStats.out
@@ -610,8 +660,8 @@ workflow wf_qc_recal_bams{
         insert_size_metrics = CollectInsertSizeMetrics.out[0]
         insert_size_metrics_pdf = CollectInsertSizeMetrics.out[1]
         hs_metrics = CollectHsMetrics.out
-        bam_qc = BamQC.out
-} // end of wf_qc_recal_bams
+        // bam_qc = BamQC.out
+} // end of wf_qc_bams_recal
 
 workflow wf_haplotypecaller{
     take: _int_bam_recal
@@ -819,7 +869,7 @@ workflow wf_mutect2_single{
             _concat_vcf,
             _fasta_fai,
             _target_bed,
-            'Mu2_single_unfiltered', // prefix for output files
+            'mutect2_single_unfiltered', // prefix for output files
             'vcf', // extension for the output files
             'Mutect2_single_mode_unfiltered' // output directory name
             )
@@ -847,6 +897,73 @@ workflow wf_mutect2_single{
     emit:
         vcf = FilterMutect2SingleCalls.out
 } // end of wf_mutect2_single
+
+workflow wf_mutect2_TN{
+    take: _int_pair_bam
+    take: _fasta
+    take: _fasta_fai
+    take: _dict
+    take: _germline_resource
+    take: _germline_resource_index
+    // take: _pon_somatic
+    // take: _pon_somatic_index
+    take: _target_bed
+
+    main:
+
+
+        Mutect2TN(
+            _int_pair_bam,
+            _fasta,
+            _fasta_fai,
+            _dict,
+            _germline_resource,
+            _germline_resource_index,
+            // _pon_somatic,
+            // _pon_somatic_index
+        )
+        // group scattered vcf's (per interval) by the 
+        // idPatient, and idSample
+
+        _concat_vcf = Mutect2TN.out.vcf
+                      .groupTuple(by: [0, 1])
+                      
+        _concat_vcf = Channel.from('Mutect2_TN')
+                      .combine(_concat_vcf)
+                    //   .dump(tag: 'vcf_concat_vcf')
+        
+        ConcatVCF(
+            _concat_vcf,
+            _fasta_fai,
+            _target_bed,
+            'mutect2_TN_unfiltered', // prefix for output files
+            'vcf', // extension for the output files
+            'Mutect2_unfiltered' // output directory name
+            )
+        // Now merge the stats together (groupby [idPatient, idSample])
+         _merge_stats = Mutect2TN.out.stats
+                      .groupTuple(by: [0, 1, 2])
+
+        MergeMutect2TNStats(_merge_stats)
+        // Now group per sample vcfs with correcsponding stats
+        // remove the variant caller lable
+        _concatenated_vcf = ConcatVCF.out.concatenated_vcf_with_index
+                            .map{variantCaller, idPatient, idSampleTN, vcf, tbi ->
+                            [idPatient, idSampleTN, vcf, tbi]}
+        // join operator will join vcfs with their corresponding stats on the 
+        // matching key [idPatient, idSample]
+        _vcf_for_filtering = _concatenated_vcf
+                            .join(MergeMutect2TNStats.out, by:[0,1])
+        FilterMutect2TNCalls(_vcf_for_filtering,
+                                 _fasta,
+                                 _fasta_fai,
+                                 _dict,
+                                 _germline_resource,
+                                 _germline_resource_index)
+
+    emit:
+        vcf = FilterMutect2TNCalls.out
+} // end of wf_mutect2_TN
 
 workflow wf_somatic_pon{
     take:  _vcfs_normal
@@ -1309,68 +1426,48 @@ workflow{
     ch_bed_intervals = wf_build_intervals.out.bed_intervals
     if (params.no_intervals && step != 'annotate') 
         ch_bed_intervals = Channel.from(file("no_intervals.bed"))
-    wf_partition_fastq()
-    ch_input_pair_reads = wf_partition_fastq.out.pair_reads
+    
+    // wf_partition_fastq()
+    // ch_input_pair_reads = wf_partition_fastq.out.pair_reads
 
     
     // FastQCFQ(ch_input_sample)     
-    wf_fastqc_fq(ch_input_sample)
-    MapReads(
-        ch_input_pair_reads, 
-            ch_fasta,
-            ch_fasta_fai,
-            ch_bwa_index
-    )
-    wf_merge_mapped_reads(MapReads.out.bam_mapped)
-    wf_qc_filter_mapped_reads(MapReads.out.bam_mapped)
+    ch_unmarked_bams = Channel.empty()
+    // ch_unmarked_bams_qc_reports = Channel.empty()
+    if (step == 'mapping'){
+        wf_fastqc_fq(ch_input_sample)
+        wf_map_reads(ch_input_sample,
+                    ch_fasta,
+                    ch_fasta_fai,
+                    ch_bwa_index
+        )
+        ch_unmarked_bams = wf_map_reads.out.bams_mapped       
+    }
+    // QC raw bams
+    wf_qc_bam_mapped(ch_unmarked_bams,
+                        ch_target_bed)
+    
 
-    /* 
-    Now depending upong the params.filter_bams, either send
-    unfiltered or filtered bams for the downstream analysis
-    */
-    
-    ch_merged_bams = Channel.empty()
-    if (params.filter_bams)
-        ch_merged_bams = wf_qc_filter_mapped_reads.out.merged_bams
-    else
-        ch_merged_bams = wf_merge_mapped_reads.out.merged_bams
-    
     // If the pipeline is being started from the step 'markdups'
     // use bams from the provided tsv
     if (step == 'markdups'){
-       ch_merged_bams = ch_input_sample
+       ch_unmarked_bams = ch_input_sample
     }
 
-   // MarkDuplicate Bams using gatk MarkDuplicates
-    wf_mark_duplicates(ch_merged_bams)
-    // wf_mark_duplicates output
-    //tuple idPatient, idSample, file("md.bam"), file("md.bai")
+    ch_marked_bams = Channel.empty()
+    if (!(step in ['recalibrate', 'variantcalling', 'annotate'])){
+            wf_mark_duplicates(ch_unmarked_bams)
+            ch_marked_bams = wf_mark_duplicates.out.dm_bams
+    }
     
-    // Filter Bams based upong the bam_mapping_q, and params.filter_bams
-    // Rebecca's request
-    // wf_filter_bams(wf_mark_duplicates.out.dm_bams)
     
-    // Use Duplicated Marked Bams for DeepVariant
-    wf_deepvariant(
-                wf_mark_duplicates.out.dm_bams,
-                ch_target_bed,
-                ch_fasta,
-                ch_fasta_fai,
-                ch_fasta_gz,
-                ch_fasta_gz_fai,
-                ch_fasta_gzi
-                )
-
-    ch_int_dm_bams = wf_mark_duplicates.out.dm_bams.combine(ch_bed_intervals)
     
-    wf_mpileup(
-        ch_int_dm_bams,
-        ch_fasta,
-            ch_fasta_fai
-    )
-
-    wf_recal_bams(
-            wf_mark_duplicates.out.dm_bams, // recalibrated bams
+    ch_bams_recal = Channel.empty()
+    // ch_recal_bams_qc = Channel.empty()
+    ch_bams_recal_on_target = Channel.empty()
+     if (!(step in ['variantcalling', 'annotate'])){
+        wf_recal_bams(
+            ch_marked_bams, // recalibrated bams
             ch_bed_intervals,
             ch_fasta,
             ch_fasta_fai,         
@@ -1379,41 +1476,62 @@ workflow{
             ch_dbsnp_index,
             ch_known_indels,
             ch_known_indels_index
-    )
-    // ch_int_bam_recal carries a cross product of recalibrated bams and the interval files
-    ch_int_bam_recal = wf_recal_bams.out.bam_recal
-                    .combine(ch_bed_intervals)
+        )
+        ch_bams_recal = wf_recal_bams.out.bams_recal
+        wf_recal_bams_on_target(ch_bams_recal,
+                                ch_padded_target_bed)
+        // ch_recal_bams_qc = wf_recal_bams.out.bam_recal_qc
+        ch_bams_recal_on_target = wf_recal_bams_on_target.out.bam_recal_on_target
+    }
+    
+   
    
     // Run QC metrics generation processes on the recalibrated bams
 
-    wf_qc_recal_bams(
-            wf_merge_mapped_reads.out.merged_bams_qc, // raw, unmarked, un-recalibrated bams
-            wf_recal_bams.out.bam_recal_qc,
-            wf_recal_bams.out.bam_recal_on_target_qc,
+    wf_qc_bam_recal(
+            ch_bams_recal,
+            ch_bams_recal_on_target,
             ch_target_bed,
             ch_bait_bed,
             ch_fasta,
             ch_fasta_fai,         
             ch_dict
             )
+/* At this point we have all four sets of bams:
+a) raw unmarked bams
+b) quality filtered raw unmarked bams
+c) marked bams (either the raw unfiltered, or quality filtered (from the step 'b' above) )
+d) recalibrated bams
+*/
+    // Use Duplicated Marked Bams for DeepVariant
+    wf_deepvariant(
+                ch_marked_bams,
+                ch_target_bed,
+                ch_fasta,
+                ch_fasta_fai,
+                ch_fasta_gz,
+                ch_fasta_gz_fai,
+                ch_fasta_gzi
+                )
 
-    // Handle the Mutect2 related workflows
+    ch_int_dm_bams = ch_marked_bams.combine(ch_bed_intervals)
+    
+    wf_mpileup(
+        ch_int_dm_bams,
+        ch_fasta,
+            ch_fasta_fai
+    )
 
-    // separate BAM by status
-    // bamNormal = Channel.empty()
-    // bamTumor = Channel.empty ()
     ch_bams = Channel.empty()
     if (step == 'variantcalling'){
        ch_bams = ch_input_sample 
+    } else{
+        ch_bams = ch_bams_recal
     }
 
-    (bam_normal, bam_tumor) = 
-        ch_bams.branch{
-            _:  statusMap[it[0], it[1]] == 0
-            __: statusMap[it[0], it[1]] == 1
-        }
-    bam_normal.dump(tag: 'bam_normal: ')
-    bam_tumor.dump(tag: 'bam_tumor: ')
+    // Handle the Mutect2 related workflows
+
+    
     
     // We need to prepare samples going to the mutect2 single sample mode.
     // This depends upon what is included in the params.tools. 
@@ -1437,6 +1555,43 @@ workflow{
         ch_dict,
         ch_germline_resource,
         ch_germline_resource_index,
+        ch_target_bed
+    )
+
+    // separate BAM by status
+    bamNormal = Channel.empty()
+    bamTumor = Channel.empty ()
+  
+
+    (bam_normal, bam_tumor) = 
+        ch_bams.branch{
+            _:  statusMap[it[0], it[1]] == 0
+            __: statusMap[it[0], it[1]] == 1
+        }
+    // bam_normal.dump(tag: 'bam_normal: ')
+    // bam_tumor.dump(tag: 'bam_tumor: ')
+
+    // Crossing Normal and Tumor to get a T/N pair for Somatic Variant Calling
+    // Remapping channel to remove common key idPatient
+    // normal[0], and tumor[0] both are idPatient, so we keep just one at the start of the tuple
+    pair_bam = bam_normal.cross(bam_tumor).map {
+        normal, tumor ->
+        [normal[0], normal[1], normal[2], normal[3], tumor[1], tumor[2], tumor[3]]
+    }
+    // pair_bam.dump(tag:'BAM Somatic Pair')
+    // take a cross product of the pair_bams with intervals for parrelization
+    ch_int_pair_bam = pair_bam.combine(ch_bed_intervals)
+    // ch_int_pair_bam.dump(tag:'ch_int_pair_bam')
+   // Mutect2 Tumor Normal workflow
+    wf_mutect2_TN(
+        ch_int_pair_bam,
+        ch_fasta,
+        ch_fasta_fai,
+        ch_dict,
+        ch_germline_resource,
+        ch_germline_resource_index,
+        // ch_somatic_pon,
+        // ch_somatic_pon_index,
         ch_target_bed
     )
     // For somatic pon, only filter the mutect2 single vcf's for normal samples
@@ -1472,7 +1627,9 @@ workflow{
     
 
     // bam_HaplotypeCaller => [idPatient, idSample, recalibrated bam, bam.bai, single interval to operate on]
-    
+       // ch_int_bam_recal carries a cross product of recalibrated bams and the interval files
+    ch_int_bam_recal = ch_bams
+                    .combine(ch_bed_intervals)
   
     wf_haplotypecaller(
         ch_int_bam_recal,
@@ -1531,14 +1688,15 @@ workflow{
     // )
     
     wf_germline_cnv(
-        wf_recal_bams.out.bam_recal,
+        ch_bams,
         ch_target_bed,
         ch_fasta,
         ch_fasta_fai
     )
 
     wf_gatk_somatic_cnv (
-        wf_mark_duplicates.out.dm_bams,
+        // wf_mark_duplicates.out.dm_bams,
+        ch_bams,
         ch_target_bed,
         ch_fasta,
         ch_fasta_fai,         
@@ -1546,7 +1704,8 @@ workflow{
         ch_read_count_pon
     )
 
-    wf_savvy_somatic_cnv(wf_mark_duplicates.out.dm_bams)
+    // wf_savvy_somatic_cnv(wf_mark_duplicates.out.dm_bams)
+    wf_savvy_somatic_cnv(ch_bams)
     wf_vcf_stats(wf_deepvariant.out.vcf,
         wf_genotype_gvcf.out.vcfs_with_indexes
         )
@@ -1554,14 +1713,13 @@ workflow{
     wf_multiqc(
         wf_get_software_versions.out,
         wf_fastqc_fq.out.fastqc_reports.collect().ifEmpty([]),
-        wf_qc_recal_bams.out.bam_qc,
+        wf_qc_bam_mapped.out.bam_qc,
+        wf_qc_bam_recal.out.samtools_stats,
+        wf_qc_bam_recal.out.alignment_summary_metrics,
+        wf_qc_bam_recal.out.insert_size_metrics, 
+        wf_qc_bam_recal.out.hs_metrics.ifEmpty([]),
         wf_vcf_stats.out.bcfootls_stats,
-        wf_vcf_stats.out.vcfootls_stats,
-        // wf_mark_duplicates.out.dm_bam_stats,
-        wf_qc_recal_bams.out.samtools_stats,
-        wf_qc_recal_bams.out.alignment_summary_metrics,
-        wf_qc_recal_bams.out.insert_size_metrics, 
-        wf_qc_recal_bams.out.hs_metrics.ifEmpty([])
+        wf_vcf_stats.out.vcfootls_stats
     )
 //    wf_annotate()
 //    wf_multiqc()
@@ -2125,7 +2283,7 @@ process MapReads {
         tuple idPatient, idSample, idRun, file("${idSample}_${idRun}.bam"), emit : bam_mapped
         tuple idPatient, val("${idSample}_${idRun}"), file("${idSample}_${idRun}.bam"), emit : bam_mapped_BamQC
     
-    when: !(step in ['markdups','recalibrate', 'variantcalling', 'annotate'])
+    // when: !(step in ['markdups','recalibrate', 'variantcalling', 'annotate'])
     script:
     // -K is an hidden option, used to fix the number of reads processed by bwa mem
     // Chunk size can affect bwa results, if not specified,
@@ -2306,13 +2464,13 @@ process MergeBamMapped {
         // tuple idPatient, idSample, idRun, file(bam), val bam_type
 
     output:
-        tuple idPatient, idSample,  file("${idSample}${out_suffix}")
+        tuple idPatient, idSample,  file("${idSample}${out_suffix}.bam")
 
     script:
     // suffix = bams.first().minus("${idSample}_${idRun}")
     // out_file = "${idSample}${suffix}"
     """
-    samtools merge --threads ${task.cpus} "${idSample}${out_suffix}" ${bams}
+    samtools merge --threads ${task.cpus} "${idSample}${out_suffix}.bam" ${bams}
     """
 }
 
@@ -2564,7 +2722,7 @@ process MergeBamRecal {
         tuple idPatient, idSample, file(bam)
 
     output:
-        tuple idPatient, idSample, file("${idSample}.recal.bam"), file("${idSample}.recal.bam.bai"), emit: bam_recal
+        tuple idPatient, idSample, file("${idSample}.recal.bam"), file("${idSample}.recal.bai"), emit: bam_recal
         tuple idPatient, idSample, file("${idSample}.recal.bam"), emit: bam_recal_qc
         // set idPatient, idSample into bamRecalTSV
 
@@ -2574,6 +2732,7 @@ process MergeBamRecal {
     """
     samtools merge --threads ${task.cpus} ${idSample}.recal.bam ${bam}
     samtools index ${idSample}.recal.bam
+    mv ${idSample}.recal.bam.bai ${idSample}.recal.bai
     """
 }
 
@@ -2589,8 +2748,8 @@ process BamRecalOnTarget {
         file(paddedTargetBed)
 
     output:
-        tuple idPatient, idSample, file("${idSample}.recal.on_target.bam"), file("${idSample}.recal.on_target.bam.bai"), emit: bam_recal_on_target
-        tuple idPatient, idSample, file("${idSample}.recal.on_target.bam"), emit: bam_recal_on_target_qc
+        tuple idPatient, idSample, file("${idSample}.recal.on_target.bam"), file("${idSample}.recal.on_target.bai"), emit: bam_recal_on_target
+        // tuple idPatient, idSample, file("${idSample}.recal.on_target.bam"), emit: bam_recal_on_target_qc
         
     when: params.padded_target_bed && !('on_target_assessment' in skipQC)
 
@@ -2598,6 +2757,7 @@ process BamRecalOnTarget {
     """
     bedtools intersect -a ${idSample}.recal.bam -b ${paddedTargetBed} > ${idSample}.recal.on_target.bam
     samtools index ${idSample}.recal.on_target.bam
+    mv ${idSample}.recal.on_target.bam.bai ${idSample}.recal.on_target.bai
     """
 }
 
@@ -2744,6 +2904,7 @@ process CollectHsMetrics{
     publishDir "${params.outdir}/Reports/${idSample}/hs_metrics/", mode: params.publish_dir_mode
     
     input:
+    // tuple idPatient, idSample, file(bam), file(bai)
     tuple idPatient, idSample, file(bam)
     file(fasta) 
     file(fastaFai)
@@ -3935,90 +4096,82 @@ process CreateSomaticPON{
 ================================================================================
 */
 
-// process Mutect2{
-//     tag {idSampleTumor + "_vs_" + idSampleNormal + "-" + intervalBed.baseName}
-//     label 'cpus_2'
+process Mutect2TN{
+    tag {idSampleTumor + "_vs_" + idSampleNormal + "-" + intervalBed.baseName}
+    label 'cpus_2'
 
-//     input:
-//         tuple idPatient, 
-//             idSampleNormal, file(bamNormal), file(baiNormal),
-//             idSampleTumor, file(bamTumor), file(baiTumor), 
-//             file(intervalBed)
-//         file(fasta)
-//         file(fastaFai)
-//         file(dict)
-//         file(germlineResource)
-//         file(germlineResourceIndex)
-//         file(ponSomatic)
-//         file(ponSomaticIndex)
+    input:
+        tuple idPatient, 
+            idSampleNormal, file(bamNormal), file(baiNormal),
+            idSampleTumor, file(bamTumor), file(baiTumor), 
+            file(intervalBed)
+        file(fasta)
+        file(fastaFai)
+        file(dict)
+        file(germlineResource)
+        file(germlineResourceIndex)
+        // file(ponSomatic)
+        // file(ponSomaticIndex)
 
-//     output:
-//         tuple 
-//             val("Mutect2"), 
-//             idPatient,
-//             val("${idSampleTumor}_vs_${idSampleNormal}"),
-//             file("${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf")
+    output:
+        tuple idPatient,
+            val("${idSampleTumor}_vs_${idSampleNormal}"),
+            file("${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf"), emit: vcf
         
-//         tuple 
-//             idPatient,
-//             idSampleTumor,
-//             idSampleNormal,
-//             file("${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf.stats") optional true
+        tuple idPatient,
+            idSampleTumor,
+            idSampleNormal,
+            file("${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf.stats"), emit: stats
 
-//     when: 'mutect2' in tools
+    when: 'mutect2' in tools
 
-//     script:
-//     // please make a panel-of-normals, using at least 40 samples
-//     // https://gatkforums.broadinstitute.org/gatk/discussion/11136/how-to-call-somatic-mutations-using-gatk4-mutect2
-//     PON = params.pon_somatic ? "--panel-of-normals ${ponSomatic}" : ""
-//     """
-//     # Get raw calls
-//     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
-//       Mutect2 \
-//       -R ${fasta}\
-//       -I ${bamTumor}  -tumor ${idSampleTumor} \
-//       -I ${bamNormal} -normal ${idSampleNormal} \
-//       -L ${intervalBed} \
-//       --germline-resource ${germlineResource} \
-//       ${PON} \
-//       -O ${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf
-//     """
-// }
+    script:
+    // please make a panel-of-normals, using at least 40 samples
+    // https://gatkforums.broadinstitute.org/gatk/discussion/11136/how-to-call-somatic-mutations-using-gatk4-mutect2
+    // PON = params.pon_somatic ? "--panel-of-normals ${ponSomatic}" : ""
+    PON =  ""
+    """
+    # Get raw calls
+    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+      Mutect2 \
+      -R ${fasta}\
+      -I ${bamTumor}  -tumor ${idSampleTumor} \
+      -I ${bamNormal} -normal ${idSampleNormal} \
+      -L ${intervalBed} \
+      --germline-resource ${germlineResource} \
+      ${PON} \
+      -O ${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf
+    """
+}
 
 // // STEP GATK MUTECT2.2 - MERGING STATS
 
-// process MergeMutect2Stats {
-//     label 'cpus_16'
-//     tag {idSampleTumor + "_vs_" + idSampleNormal}
+process MergeMutect2TNStats {
+    label 'cpus_16'
+    tag {idSampleTumor + "_vs_" + idSampleNormal}
 
-//     publishDir "${params.outdir}/VariantCalling/${idSampleTumor}_vs_${idSampleNormal}/Mutect2", mode: params.publishDirMode
+    publishDir "${params.outdir}/VariantCalling/${idSampleTumor}_vs_${idSampleNormal}/Mutect2", mode: params.publish_dir_mode
 
-//     input:
-//         // tuple caller, idPatient, idSampleTumor_vs_idSampleNormal, file(vcfFiles) // corresponding small VCF chunks
-//         tuple idPatient, idSampleTumor, idSampleNormal, file(statsFiles)// the actual stats files
-//         // file(dict)
-//         // file(fasta)
-//         // file(fastaFai)
-//         // file(germlineResource)
-//         // file(germlineResourceIndex)
-//         // file(intervals) from ch_intervals
+    input:
+        // tuple caller, idPatient, idSampleTumor_vs_idSampleNormal, file(vcfFiles) // corresponding small VCF chunks
+        tuple idPatient, idSampleTumor, idSampleNormal, file(statsFiles)// the actual stats files
 
-//     output:
-//         // tuple idPatient,
-//         //     val("${idSampleTumor}_vs_${idSampleNormal}"),
-//         file("${idSampleTumor_vs_idSampleNormal}.vcf.gz.stats")
+    output:
+        tuple idPatient,
+            val("${idSampleTumor}_vs_${idSampleNormal}"),
+            file("${idSampleTumor}_vs_${idSampleNormal}.vcf.gz.stats")
 
-//     when: 'mutect2' in tools
+    when: 'mutect2' in tools
 
-//     script:     
-//       stats = statsFiles.collect{ "-stats ${it} " }.join(' ')
-//     """
-//     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
-//         MergeMutectStats \
-//         ${stats} \
-//         -O ${idSampleTumor}_vs_${idSampleNormal}.vcf.gz.stats
-//     """
-// } // end of MergeMutect2Stats
+    script:     
+      stats = statsFiles.collect{ "-stats ${it} " }.join(' ')
+    """
+    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+        MergeMutectStats \
+        ${stats} \
+        -O ${idSampleTumor}_vs_${idSampleNormal}.vcf.gz.stats
+    """
+} // end of MergeMutect2Stats
 
 // // STEP GATK MUTECT2.3 - GENERATING PILEUP SUMMARIES
 
@@ -4114,51 +4267,51 @@ process CreateSomaticPON{
 
 // // STEP GATK MUTECT2.6 - FILTERING CALLS
 
-// process FilterMutect2Calls {
-//     label 'cpus_1'
+process FilterMutect2TNCalls {
+    label 'cpus_1'
 
-//     tag {idSampleTN}
+    tag {idSampleTN}
 
-//     publishDir "${params.outdir}/VariantCalling/${idSampleTN}/${variantCaller}", mode: params.publishDirMode
+    publishDir "${params.outdir}/VariantCalling/${idSampleTN}/Mutect2", mode: params.publish_dir_mode
 
-//     input:
-//         // tuple variantCaller, 
-//         //     idPatient, idSampleTN, file(unfiltered), file(unfilteredIndex),
-//         //     file("${idSampleTN}.vcf.gz.stats"),
-//         //     file("${idSampleTN}_contamination.table")
-//         tuple variantCaller, 
-//             idPatient, idSampleTN, file(unfiltered), file(unfilteredIndex)
-//         file("${idSampleTN}.vcf.gz.stats")
-//         file("${idSampleTN}_contamination.table")
+    input:
+        // tuple variantCaller, 
+        //     idPatient, idSampleTN, file(unfiltered), file(unfilteredIndex),
+        //     file("${idSampleTN}.vcf.gz.stats"),
+        //     file("${idSampleTN}_contamination.table")
+        tuple idPatient, 
+            idSampleTN, 
+            file(unfiltered), file(unfilteredIndex),
+            file("${idSampleTN}.vcf.gz.stats")
+            // file("${idSampleTN}_contamination.table")
         
-//         file(dict)
-//         file(fasta)
-//         file(fastaFai)
-//         file(germlineResource)
-//         file(germlineResourceIndex)
-//         // file(intervals) from ch_intervals
+        file(fasta)
+        file(fastaFai)
+        file(dict)
+        file(germlineResource)
+        file(germlineResourceIndex)
+        // file(intervals) from ch_intervals
         
-//     output:
-//         tuple val("Mutect2"), idPatient, idSampleTN,
-//             file("filtered_${variantCaller}_${idSampleTN}.vcf.gz"),
-//             file("filtered_${variantCaller}_${idSampleTN}.vcf.gz.tbi"),
-//             file("filtered_${variantCaller}_${idSampleTN}.vcf.gz.filteringStats.tsv")
+    output:
+        tuple val("Mutect2"), idPatient, idSampleTN,
+            file("filtered_mutect2_${idSampleTN}.vcf.gz"),
+            file("filtered_mutect2_${idSampleTN}.vcf.gz.tbi"),
+            file("filtered_mutect2_${idSampleTN}.vcf.gz.filteringStats.tsv")
 
-//     // when: 'mutect2' in tools && params.pon
-//     when: 'mutect2' in tools
+    // when: 'mutect2' in tools && params.pon
+    when: 'mutect2' in tools
 
-//     script:
-//     """
-//     # do the actual filtering
-//     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
-//         FilterMutectCalls \
-//         -V ${unfiltered} \
-//         --contamination-table ${idSampleTN}_contamination.table \
-//         --stats ${idSampleTN}.vcf.gz.stats \
-//         -R ${fasta} \
-//         -O filtered_${variantCaller}_${idSampleTN}.vcf.gz
-//     """
-// }
+    script:
+    """
+    # do the actual filtering
+    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+        FilterMutectCalls \
+        -V ${unfiltered} \
+        --stats ${idSampleTN}.vcf.gz.stats \
+        -R ${fasta} \
+        -O filtered_mutect2_${idSampleTN}.vcf.gz
+    """
+}
 
 
 /*
@@ -4657,7 +4810,8 @@ def defineStepList() {
         'mapping',
         'markdups',
         'recalibrate',
-        'variantcalling'
+        'variantcalling',
+        'annotate'
     ]
 }
 
