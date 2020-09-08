@@ -233,9 +233,12 @@ workflow wf_build_indexes{
                             params.known_indels_index ? ch_known_indels_index : \
                             BuildKnownIndelsIndex.out.collect() \
                             : "null"    
-    somatic_pon_index = params.somatic_pon_index ? \
-                            Channel.value(file(params.somatic_pon_index)) \
-                            : BuildSomaticPonIndex.out
+    somatic_pon_index = params.somatic_pon ? \
+                            params.somatic_pon_index? ch_somatic_pon_index: \
+                            BuildSomaticPonIndex.out \
+                            : "null"
+                            // Channel.value(file(params.somatic_pon_index)) \
+                            // : BuildSomaticPonIndex.out
     emit:
         fasta_fai = fasta_fai
         fasta_gz = fasta_gz
@@ -905,8 +908,8 @@ workflow wf_mutect2_TN{
     take: _dict
     take: _germline_resource
     take: _germline_resource_index
-    // take: _pon_somatic
-    // take: _pon_somatic_index
+    take: _pon_somatic
+    take: _pon_somatic_index
     take: _target_bed
 
     main:
@@ -919,8 +922,8 @@ workflow wf_mutect2_TN{
             _dict,
             _germline_resource,
             _germline_resource_index,
-            // _pon_somatic,
-            // _pon_somatic_index
+            _pon_somatic,
+            _pon_somatic_index
         )
         // group scattered vcf's (per interval) by the 
         // idPatient, and idSample
@@ -1590,8 +1593,8 @@ d) recalibrated bams
         ch_dict,
         ch_germline_resource,
         ch_germline_resource_index,
-        // ch_somatic_pon,
-        // ch_somatic_pon_index,
+        ch_somatic_pon,
+        ch_somatic_pon_index,
         ch_target_bed
     )
     // For somatic pon, only filter the mutect2 single vcf's for normal samples
@@ -4110,8 +4113,8 @@ process Mutect2TN{
         file(dict)
         file(germlineResource)
         file(germlineResourceIndex)
-        // file(ponSomatic)
-        // file(ponSomaticIndex)
+        file(ponSomatic)
+        file(ponSomaticIndex)
 
     output:
         tuple idPatient,
@@ -4128,8 +4131,8 @@ process Mutect2TN{
     script:
     // please make a panel-of-normals, using at least 40 samples
     // https://gatkforums.broadinstitute.org/gatk/discussion/11136/how-to-call-somatic-mutations-using-gatk4-mutect2
-    // PON = params.pon_somatic ? "--panel-of-normals ${ponSomatic}" : ""
-    PON =  ""
+    PON = params.pon_somatic ? "--panel-of-normals ${ponSomatic}" : ""
+    // PON =  ""
     """
     # Get raw calls
     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
