@@ -382,11 +382,11 @@ workflow wf_qc_filter_mapped_reads{
         FilterOutSecondaryAndSupplementaryReads(
             MergeFilteredBamReads.out.filtered_bam)
         wf_gather_mapped_reads(
-            FilterOutSecondaryAndSupplementaryReads.out.filtered_bam,
+            FilterOutSecondaryAndSupplementaryReads.out.filtered_bam_mapped,
             "_pq${params.bam_mapping_q}") // we pass an empty string as  the bam name suffix
         
     emit:
-        merged_bams = wf_gather_mapped_reads.out
+        merged_bams = wf_gather_mapped_reads.out.merged_bams
 } // end of wf_map_reads
 
 
@@ -429,7 +429,7 @@ workflow wf_map_reads{
         // Now we need to see if we need to filter the raw bams depending upon passed parameter
         if(params.filter_bams){
             wf_qc_filter_mapped_reads(MapReads.out.bam_mapped)
-            _out_bams = wf_qc_filter_mapped_reads.out.mreged_bams
+            _out_bams = wf_qc_filter_mapped_reads.out.merged_bams
         }
                               
     emit:
@@ -2415,7 +2415,7 @@ process FilterOutSecondaryAndSupplementaryReads {
         tuple idPatient, idSample, idRun,  file("${idSample}_${idRun}_filtered.bam"), file(bai)
 
     output:
-        tuple idPatient, idSample, idRun, file(out_bam),  emit: filtered_bam
+        tuple idPatient, idSample, idRun, file(out_bam),  emit: filtered_bam_mapped
 
     when: (params.filter_bams)
 
