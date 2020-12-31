@@ -186,6 +186,10 @@ ch_giab_highconf_tbi = params.giab_highconf_tbi ? Channel.value(file(params.giab
 ch_giab_highconf_regions = params.giab_highconf_regions ? Channel.value(file(params.giab_highconf_regions)) : "null"
 ch_chco_highqual_snps = params.chco_highqual_snps ? Channel.value(file(params.chco_highqual_snps)) : "null"
 
+// Parameters needed for GATK CNV calling
+gatk_cnv_contig_list = params.contig_list ? Channel.value(file(params.contig_list)) : "null"
+gatk_cnv_contig_ploidy_priors = params.contig_ploidy_priors ? Channel.value(file(params.contig_ploidy_priors)) : "null"
+
 /* Create channels for various indices. These channels are either filled by the user parameters or 
 form inside the build_indices workflow */
 ch_fasta_fai = ch_fasta_gz = ch_fasta_gzi = ch_fasta_gz_fai \
@@ -1463,12 +1467,12 @@ workflow{
             ch_marked_bams = wf_mark_duplicates.out.dm_bams
     }
     
-    gatk_PreprocessIntervals(ch_fasta,ch_fasta_fai,ch_dict) 
+    gatk_PreprocessIntervals(ch_fasta,ch_fasta_fai,ch_dict,gatk_cnv_contig_list) 
     wf_gatk_CollectReadCounts_bam_mapped(wf_map_reads.out.bams_mapped,gatk_PreprocessIntervals.out,ch_fasta,ch_fasta_fai,ch_dict)
     gatk_AnnotateIntervals(gatk_PreprocessIntervals.out,ch_fasta,ch_fasta_fai,ch_dict)
     cnv_sample_tsv = wf_gatk_CollectReadCounts_bam_mapped.out.map{idP, idS, tsv -> [tsv] }.collect()
     gatk_FilterIntervals(cnv_sample_tsv,gatk_PreprocessIntervals.out,gatk_AnnotateIntervals.out)
-    gatk_DetermineGermlineContigPloidy(cnv_sample_tsv,gatk_FilterIntervals.out,gatk_AnnotateIntervals.out) 
+    gatk_DetermineGermlineContigPloidy(cnv_sample_tsv,gatk_FilterIntervals.out,gatk_AnnotateIntervals.out,gatk_cnv_contig_ploidy_priors) 
     gatk_PostprocessGermlineCNVCalls(cnv_sample_tsv,gatk_DetermineGermlineContigPloidy.out,ch_dict)
  
     ch_bams_recal = Channel.empty()
@@ -4643,10 +4647,13 @@ process gatk_PreprocessIntervals{
     publishDir "${params.outdir}/GATK_CNV",
     mode: params.publish_dir_mode
 
+    when 'gatk_cnv' in tools
+
     input:
     file (fasta)
     file (fastai) 
     file (fastadict)
+    file (gatk_cnv_contig_list)
 
     output:
     file("PreprocessIntervals.interval_list")
@@ -4655,7 +4662,7 @@ process gatk_PreprocessIntervals{
 	gatk PreprocessIntervals \
 			-R $fasta \
 			--padding 0 \
-			-L /scratch/Shares/layer/workspace/michael_sandbox/CNV_GATK/layer_lab_vc/gcnv-chr20XY-contig.list \
+			-L $gatk_cnv_contig_list \
 			-imr OVERLAPPING_ONLY \
 			-O PreprocessIntervals.interval_list
     """
@@ -4688,6 +4695,8 @@ workflow wf_gatk_CollectReadCounts_bam_mapped{
 process gatk_CollectReadCounts {
     tag {idPatient + "-" + idSample}
 
+    when 'gatk_cnv' in tools
+
     publishDir "${params.outdir}/GATK_CNV/${idSample}/CollectReadCounts/", mode: params.publish_dir_mode
 
     input:
@@ -4714,6 +4723,8 @@ process gatk_CollectReadCounts {
 process gatk_AnnotateIntervals {
     tag {idPatient + "-" + idSample}
 
+    when 'gatk_cnv' in tools
+
     publishDir "${params.outdir}/GATK_CNV/", mode: params.publish_dir_mode
 
     input:
@@ -4736,6 +4747,8 @@ process gatk_AnnotateIntervals {
 
 process gatk_FilterIntervals {
     tag {idPatient + "-" + idSample}
+
+    when 'gatk_cnv' in tools
 
     publishDir "${params.outdir}/GATK_CNV/", mode: params.publish_dir_mode
 
@@ -4767,13 +4780,15 @@ process gatk_FilterIntervals {
 process gatk_DetermineGermlineContigPloidy {
     tag {idPatient + "-" + idSample}
 
+    when 'gatk_cnv' in tools
+
     publishDir "${params.outdir}/GATK_CNV/", mode: params.publish_dir_mode
 
     input:
         file(vcFiles)
         file(cohort_filtered_interval_list)
         file(annotated_interval_list)
-
+        file(gatk_cnv_contig_ploidy_priors)
 
     output:
     file("ploidy_calls_models_germlineCNV.tar.gz")
@@ -4789,7 +4804,7 @@ process gatk_DetermineGermlineContigPloidy {
         -L $cohort_filtered_interval_list \
         --interval-merging-rule OVERLAPPING_ONLY \
         \$input_files \
-        --contig-ploidy-priors /scratch/Shares/layer/workspace/michael_sandbox/CNV_GATK/layer_lab_vc/chr20XY_contig_ploidy_priors.tsv \
+        --contig-ploidy-priors $gatk_cnv_contig_ploidy_priors \
         --output . \
         --output-prefix ploidy \
         --verbosity DEBUG
@@ -4813,6 +4828,8 @@ process gatk_DetermineGermlineContigPloidy {
 
 process gatk_PostprocessGermlineCNVCalls {
     tag {idPatient + "-" + idSample}
+
+    when 'gatk_cnv' in tools
 
     publishDir "${params.outdir}/GATK_CNV/", mode: params.publish_dir_mode
 
@@ -5071,7 +5088,8 @@ def defineToolList() {
         'strelka',
         'tiddit',
         'tnscope',
-        'vep'
+        'vep',
+        'gatk_cnv'
     ]
 }
 
