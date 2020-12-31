@@ -7,3 +7,10 @@ results/
 Makefile
 .nextflow/
 .nextflow.log*
+TEMP/
+bin/bin/
+chr20XY_contig_ploidy_priors.tsv
+gcnv-chr20XY-contig.list
+res2/
+sample_0.tsv
+single.tsv
