@@ -192,6 +192,10 @@ ch_giab_highconf_tbi = params.giab_highconf_tbi ? Channel.value(file(params.giab
 ch_giab_highconf_regions = params.giab_highconf_regions ? Channel.value(file(params.giab_highconf_regions)) : "null"
 ch_chco_highqual_snps = params.chco_highqual_snps ? Channel.value(file(params.chco_highqual_snps)) : "null"
 
+// Parameters needed for GATK CNV calling
+gatk_cnv_contig_list = params.contig_list ? Channel.value(file(params.contig_list)) : "null"
+gatk_cnv_contig_ploidy_priors = params.contig_ploidy_priors ? Channel.value(file(params.contig_ploidy_priors)) : "null"
+
 /* Create channels for various indices. These channels are either filled by the user parameters or 
 form inside the build_indices workflow */
 ch_fasta_fai = ch_fasta_gz = ch_fasta_gzi = ch_fasta_gz_fai \
@@ -1508,8 +1512,14 @@ workflow{
             ch_marked_bams = wf_mark_duplicates.out.dm_bams
     }
     
-    
-    
+    gatk_PreprocessIntervals(ch_fasta,ch_fasta_fai,ch_dict,gatk_cnv_contig_list) 
+    wf_gatk_CollectReadCounts_bam_mapped(wf_map_reads.out.bams_mapped,gatk_PreprocessIntervals.out,ch_fasta,ch_fasta_fai,ch_dict)
+    gatk_AnnotateIntervals(gatk_PreprocessIntervals.out,ch_fasta,ch_fasta_fai,ch_dict)
+    cnv_sample_tsv = wf_gatk_CollectReadCounts_bam_mapped.out.map{idP, idS, tsv -> [tsv] }.collect()
+    gatk_FilterIntervals(cnv_sample_tsv,gatk_PreprocessIntervals.out,gatk_AnnotateIntervals.out)
+    gatk_DetermineGermlineContigPloidy(cnv_sample_tsv,gatk_FilterIntervals.out,gatk_AnnotateIntervals.out,gatk_cnv_contig_ploidy_priors) 
+    gatk_PostprocessGermlineCNVCalls(cnv_sample_tsv,gatk_DetermineGermlineContigPloidy.out,ch_dict)
+ 
     ch_bams_recal = Channel.empty()
     // ch_recal_bams_qc = Channel.empty()
     ch_bams_recal_on_target = Channel.empty()
@@ -4788,6 +4798,240 @@ process MultiQC {
     """
 }
 
+/******************************************************************************************/
+                                /* GATK CNV CALLER */
+/******************************************************************************************/
+
+process gatk_PreprocessIntervals{
+    publishDir "${params.outdir}/GATK_CNV",
+    mode: params.publish_dir_mode
+
+    when 'gatk_cnv' in tools
+
+    input:
+    file (fasta)
+    file (fastai) 
+    file (fastadict)
+    file (gatk_cnv_contig_list)
+
+    output:
+    file("PreprocessIntervals.interval_list")
+	
+    """
+	gatk PreprocessIntervals \
+			-R $fasta \
+			--padding 0 \
+			-L $gatk_cnv_contig_list \
+			-imr OVERLAPPING_ONLY \
+			-O PreprocessIntervals.interval_list
+    """
+}
+
+workflow wf_gatk_CollectReadCounts_bam_mapped{
+    take: _bams_mapped // tuple idPatient, idSample, file(bam), file(bai)
+    take: _interval_list
+    take: _fasta
+    take: _fastai
+    take: _fastadict
+    
+    main:
+        _bams_mapped = _bams_mapped.map
+                                { idPatient, idSample, bam, bai ->
+                                [idPatient, idSample, bam, bai]
+                                }
+        gatk_CollectReadCounts(
+            _bams_mapped,
+            _interval_list,
+            _fasta,
+            _fastai,
+            _fastadict
+        )
+
+    emit: bam_crc = gatk_CollectReadCounts.out
+}
+
+
+process gatk_CollectReadCounts {
+    tag {idPatient + "-" + idSample}
+
+    when 'gatk_cnv' in tools
+
+    publishDir "${params.outdir}/GATK_CNV/${idSample}/CollectReadCounts/", mode: params.publish_dir_mode
+
+    input:
+        tuple idPatient, idSample, file(bam), file(bai)
+        file(interval_list)
+		file (fasta)
+	    file (fastai)
+	    file (fastadict)
+
+    output:
+        tuple idPatient, idSample, file("gatk_${idSample}_CollectReadCounts.tsv")
+
+    """
+	gatk CollectReadCounts \
+	    -L $interval_list \
+	    -R $fasta \
+	    -imr OVERLAPPING_ONLY \
+	    -I $bam \
+	    --format TSV \
+	    -O gatk_${idSample}_CollectReadCounts.tsv
+    """
+}
+
+process gatk_AnnotateIntervals {
+    tag {idPatient + "-" + idSample}
+
+    when 'gatk_cnv' in tools
+
+    publishDir "${params.outdir}/GATK_CNV/", mode: params.publish_dir_mode
+
+    input:
+        file(interval_list)
+	file (fasta)
+	file (fastai)
+	file (fastadict)
+
+    output:
+        file("AnnotateIntervals.annotated.tsv")
+
+    """
+    gatk AnnotateIntervals \
+            -L $interval_list \
+            -R $fasta \
+            -imr OVERLAPPING_ONLY \
+            -O AnnotateIntervals.annotated.tsv
+	"""
+}
+
+process gatk_FilterIntervals {
+    tag {idPatient + "-" + idSample}
+
+    when 'gatk_cnv' in tools
+
+    publishDir "${params.outdir}/GATK_CNV/", mode: params.publish_dir_mode
+
+    input:
+        file(vcFiles)
+        file(interval_list)
+        file(annotated_interval_list)
+
+    output:
+        file("FilterIntervals.cohort.gc.filtered.interval_list")
+
+    """
+    input_files=""
+    for file in ${vcFiles}; do
+      input_files+="-I \${file} "
+    done
+
+    echo \$input_files
+    gatk FilterIntervals \
+        -L $interval_list \
+        --annotated-intervals $annotated_interval_list \
+        \$input_files \
+        -imr OVERLAPPING_ONLY \
+        -O FilterIntervals.cohort.gc.filtered.interval_list
+    """
+
+}
+
+process gatk_DetermineGermlineContigPloidy {
+    tag {idPatient + "-" + idSample}
+
+    when 'gatk_cnv' in tools
+
+    publishDir "${params.outdir}/GATK_CNV/", mode: params.publish_dir_mode
+
+    input:
+        file(vcFiles)
+        file(cohort_filtered_interval_list)
+        file(annotated_interval_list)
+        file(gatk_cnv_contig_ploidy_priors)
+
+    output:
+    file("ploidy_calls_models_germlineCNV.tar.gz")
+
+    """
+    input_files=""
+    for file in ${vcFiles}; do
+      input_files+="-I \${file} "
+    done
+
+    echo \$input_files
+    gatk DetermineGermlineContigPloidy \
+        -L $cohort_filtered_interval_list \
+        --interval-merging-rule OVERLAPPING_ONLY \
+        \$input_files \
+        --contig-ploidy-priors $gatk_cnv_contig_ploidy_priors \
+        --output . \
+        --output-prefix ploidy \
+        --verbosity DEBUG
+
+    echo \$input_files
+
+    gatk GermlineCNVCaller \
+        --run-mode COHORT \
+        -L $cohort_filtered_interval_list \
+        \$input_files \
+        --contig-ploidy-calls ploidy-calls \
+        --annotated-intervals $annotated_interval_list \
+        --interval-merging-rule OVERLAPPING_ONLY \
+        --output cohort \
+        --output-prefix cohort\
+        --verbosity DEBUG
+
+    tar -czf ploidy_calls_models_germlineCNV.tar.gz ploidy-calls/ ploidy-model/ cohort/
+    """
+}
+
+process gatk_PostprocessGermlineCNVCalls {
+    tag {idPatient + "-" + idSample}
+
+    when 'gatk_cnv' in tools
+
+    publishDir "${params.outdir}/GATK_CNV/", mode: params.publish_dir_mode
+
+    input:
+        file(vcFiles)
+        file(ploidy_calls_models_germlineCNV_tar_gz)
+        file(fastadict)
+
+    output:
+    file("PostprocessGermlineCNVResults")
+
+    """
+    tar -xf $ploidy_calls_models_germlineCNV_tar_gz
+    mkdir PostprocessGermlineCNVResults
+    
+    input_files=""
+    count=0
+    for file in ${vcFiles}; do
+        result=\$(echo "\$file" | sed "s/_CollectReadCounts.tsv//")
+        outname="PostprocessGermlineCNVCalls_\${result}.txt"
+        ogi="genotyped-intervals_\${result}.vcf.gz"
+        ogs="genotyped-segments_\${result}.vcf.gz"
+        echo \$outname
+        echo \$ogi
+        echo \$ogs
+        gatk PostprocessGermlineCNVCalls \
+            --model-shard-path cohort/cohort-model \
+            --calls-shard-path cohort/cohort-calls \
+            --allosomal-contig X --allosomal-contig Y \
+            --contig-ploidy-calls ploidy-calls \
+            --sample-index \$count \
+            --output-genotyped-intervals \$ogi \
+            --output-genotyped-segments \$ogs \
+            --sequence-dictionary $fastadict \
+            --output-denoised-copy-ratios \$outname
+
+        ((count=count+1))
+    done
+    mv PostprocessGermlineCNVCalls_*.txt PostprocessGermlineCNVResults/
+    mv genotyped-segments_*.vcf.gz PostprocessGermlineCNVResults/     
+
+	"""
+}
 
 /******************************************************************************************/
                                 /* Helper functions */
@@ -5006,7 +5250,8 @@ def defineToolList() {
         'strelka',
         'tiddit',
         'tnscope',
-        'vep'
+        'vep',
+        'gatk_cnv'
     ]
 }
 
