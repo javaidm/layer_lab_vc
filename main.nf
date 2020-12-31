@@ -120,7 +120,12 @@ params.dbsnp_index = params.genome && params.dbsnp ? params.genomes[params.genom
 params.dict = params.genome && params.fasta ? params.genomes[params.genome].dict ?: null : null
 params.germline_resource = params.genome ? params.genomes[params.genome].germline_resource ?: null : null
 params.germline_resource_index = params.genome && params.germline_resource ? params.genomes[params.genome].germline_resource_index ?: null : null
-params.intervals = params.genome && !('annotate' in step) ? params.genomes[params.genome].intervals ?: null : null
+
+// if user has not specified intervals on the commandline, pick them from the genomes.config file
+if(! params.intervals){
+    params.intervals = params.genome && !('annotate' in step) ? params.genomes[params.genome].intervals ?: null : null
+}
+
 params.known_indels = params.genome && ( 'mapping' in step || 'markdups' in step ) \
                             ? params.genomes[params.genome].known_indels ?: null : null
 
@@ -179,6 +184,7 @@ ch_cadd_InDels = params.cadd_InDels ? Channel.value(file(params.cadd_InDels)) : 
 ch_cadd_InDels_tbi = params.cadd_InDels_tbi ? Channel.value(file(params.cadd_InDels_tbi)) : "null"
 ch_cadd_WG_SNVs = params.cadd_WG_SNVs ? Channel.value(file(params.cadd_WG_SNVs)) : "null"
 ch_cadd_WG_SNVs_tbi = params.cadd_WG_SNVs_tbi ? Channel.value(file(params.cadd_WG_SNVs_tbi)) : "null"
+ch_cnvkit_ref = params.cnvkit_ref ? Channel.value(file(params.cnvkit_ref)) : "null"
 
 // Optional CHCO files for calculating TP, FP, TN etc against the GIAB
 ch_giab_highconf_vcf = params.giab_highconf_vcf ? Channel.value(file(params.giab_highconf_vcf)) : "null"
@@ -1156,6 +1162,7 @@ workflow wf_germline_cnv{
     take: _target_bed
     take: _fasta
     take: _fasta_fai
+    take: _cnvkit_ref
     
     main:
     //     StrelkaSingle(
@@ -1167,7 +1174,12 @@ workflow wf_germline_cnv{
         MarkDuplicates(
             _raw_bam
         )
-        
+        CNVKitSingle(
+             MarkDuplicates.out,
+            _fasta,
+            _fasta_fai,
+            _cnvkit_ref
+        )
         MantaSingle(
             MarkDuplicates.out,
             _fasta,
@@ -1478,6 +1490,8 @@ workflow{
         ch_fastqc_report = wf_fastqc_fq.out.fastqc_reports.collect()
     }
     // QC raw bams
+    ch_bam_qc_mapped = Channel.empty()
+    
     wf_qc_bam_mapped(ch_unmarked_bams,
                         ch_target_bed)
     
@@ -1712,21 +1726,21 @@ d) recalibrated bams
         ch_dbsnp_index
     )
 
-    // wf_hap_py(
-    //     wf_deepvariant.out.vcf,
-    //     wf_genotype_gvcf.out.vcfs_with_indexes,
-    //     ch_target_bed,
-    //     ch_bait_bed,
-    //       ch_fasta,
-    //     ch_fasta_fai
-    // )
+    // Only run the germline_cnv if it's exclusively asked by one of the tools
+
+    if (    ('cnvkit_single' in tools) || 
+            ('manta_single' in tools) || 
+            ('tiddit' in tools)
+        ){
+            wf_germline_cnv(
+            ch_bams,
+            ch_target_bed,
+            ch_fasta,
+            ch_fasta_fai,
+            ch_cnvkit_ref
+            )
+        }
     
-    wf_germline_cnv(
-        ch_bams,
-        ch_target_bed,
-        ch_fasta,
-        ch_fasta_fai
-    )
 
     wf_gatk_somatic_cnv (
         // wf_mark_duplicates.out.dm_bams,
@@ -3584,7 +3598,7 @@ process MergeMpileup {
 
 process StrelkaSingle {
     label 'cpus_max'
-    label 'memory_max'
+    // label 'memory_max'
 
     tag {idSample}
 
@@ -4711,34 +4725,34 @@ process SavvyCNV {
     """
 }
 
-// /* CNVKit related processes */
-// // CNVKIT related
-// process CNVKitSingle{
-//     label 'cpus_32'
-//     publishDir "${params.outdir}/VariantCalling/CNVKit", mode: params.publish_dir_mode
+/* CNVKit related processes */
+// CNVKIT related
+process CNVKitSingle{
+    label 'cpus_8'
+    publishDir "${params.outdir}/VariantCalling/${idSample}/CNVKit", mode: params.publish_dir_mode
     
-//     input:
-//         file("bams/*")
-//         file(fasta)
-//         file(targetBED)
+    input:
+        tuple idPatient, idSample, file(bam), file(bai)
+        file(fasta)
+        file(fastaFai)
+        file(cnvkit_ref)
+        // file(targetBED)
     
-//     output:
-//     file('SingleSampleMode')
+    output:
+    tuple val("cnvkit_single"), idPatient, idSample, file("*")
 
-//     when: 'cnvkit' in tools
+    when: params.cnvkit_ref && 'cnvkit_single' in tools
 
-//     script:
+    script:
     
-    
-//     """
-//     init.sh
-//     cnvkit.py batch -p32 bams/*.bam
-//         --targets ${targetBED} \
-//         --fasta  ${fasta}  \
-//         --output-dir SingleSampleMode \
-//         --scatter
-//     """
-// }
+    """
+    init.sh
+    cnvkit.py batch ${bam} \
+        --reference ${cnvkit_ref} \
+        --scatter \
+        --diagram
+    """
+}
 /*
 ================================================================================
                                      MultiQC
@@ -4800,6 +4814,7 @@ def printSummary(){
     if (step)                       summary['Step']              = step
     if (params.tools)               summary['Tools']             = tools.join(', ')
     if (params.skip_qc)              summary['QC tools skip']     = skipQC.join(', ')
+    if (params.filter_bams)              summary['params.filter_bams']     = params.filter_bams
 
     if (params.no_intervals && step != 'annotate') summary['Intervals']         = 'Do not use'
     if ('haplotypecaller' in tools)                summary['GVCF']              = params.no_gvcf ? 'No' : 'Yes'
@@ -4982,6 +4997,7 @@ def defineToolList() {
         'gatkcnv',
         'savvycnv',
         'cnvkit',
+        'cnvkit_single',
         'mutect2',
         'mutect2_single',
         'gen_somatic_pon',
