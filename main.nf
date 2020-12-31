@@ -120,7 +120,12 @@ params.dbsnp_index = params.genome && params.dbsnp ? params.genomes[params.genom
 params.dict = params.genome && params.fasta ? params.genomes[params.genome].dict ?: null : null
 params.germline_resource = params.genome ? params.genomes[params.genome].germline_resource ?: null : null
 params.germline_resource_index = params.genome && params.germline_resource ? params.genomes[params.genome].germline_resource_index ?: null : null
-params.intervals = params.genome && !('annotate' in step) ? params.genomes[params.genome].intervals ?: null : null
+
+// if user has not specified intervals on the commandline, pick them from the genomes.config file
+if(! params.intervals){
+    params.intervals = params.genome && !('annotate' in step) ? params.genomes[params.genome].intervals ?: null : null
+}
+
 params.known_indels = params.genome && ( 'mapping' in step || 'markdups' in step ) \
                             ? params.genomes[params.genome].known_indels ?: null : null
 
@@ -179,6 +184,7 @@ ch_cadd_InDels = params.cadd_InDels ? Channel.value(file(params.cadd_InDels)) : 
 ch_cadd_InDels_tbi = params.cadd_InDels_tbi ? Channel.value(file(params.cadd_InDels_tbi)) : "null"
 ch_cadd_WG_SNVs = params.cadd_WG_SNVs ? Channel.value(file(params.cadd_WG_SNVs)) : "null"
 ch_cadd_WG_SNVs_tbi = params.cadd_WG_SNVs_tbi ? Channel.value(file(params.cadd_WG_SNVs_tbi)) : "null"
+ch_cnvkit_ref = params.cnvkit_ref ? Channel.value(file(params.cnvkit_ref)) : "null"
 
 // Optional CHCO files for calculating TP, FP, TN etc against the GIAB
 ch_giab_highconf_vcf = params.giab_highconf_vcf ? Channel.value(file(params.giab_highconf_vcf)) : "null"
@@ -382,11 +388,11 @@ workflow wf_qc_filter_mapped_reads{
         FilterOutSecondaryAndSupplementaryReads(
             MergeFilteredBamReads.out.filtered_bam)
         wf_gather_mapped_reads(
-            FilterOutSecondaryAndSupplementaryReads.out.filtered_bam,
+            FilterOutSecondaryAndSupplementaryReads.out.filtered_bam_mapped,
             "_pq${params.bam_mapping_q}") // we pass an empty string as  the bam name suffix
         
     emit:
-        merged_bams = wf_gather_mapped_reads.out
+        merged_bams = wf_gather_mapped_reads.out.merged_bams
 } // end of wf_map_reads
 
 
@@ -429,7 +435,7 @@ workflow wf_map_reads{
         // Now we need to see if we need to filter the raw bams depending upon passed parameter
         if(params.filter_bams){
             wf_qc_filter_mapped_reads(MapReads.out.bam_mapped)
-            _out_bams = wf_qc_filter_mapped_reads.out.mreged_bams
+            _out_bams = wf_qc_filter_mapped_reads.out.merged_bams
         }
                               
     emit:
@@ -641,7 +647,7 @@ workflow wf_qc_bam_recal{
         _bam_collect_hs_metrics = _bams_recal_qc
         if (!('on_target_assessment' in skipQC)){
             _bam_collect_hs_metrics = _bam_collect_hs_metrics
-                                       .mix(_bams_recal_on_target) 
+                                       .mix(_bams_recal_on_target_qc) 
         }
                                     
         
@@ -1152,30 +1158,39 @@ workflow wf_vcf_stats{
 workflow wf_germline_cnv{
     // deepvariant output
     //tuple val('DeepVariant'), idSample, file("${idSample}.vcf.gz")
-    take: _bam_recal
+    take: _raw_bam
     take: _target_bed
     take: _fasta
     take: _fasta_fai
+    take: _cnvkit_ref
     
     main:
-        StrelkaSingle(
-            _bam_recal,
+    //     StrelkaSingle(
+    //         _bam_recal,
+    //         _fasta,
+    //         _fasta_fai,
+    //         _target_bed
+    // )
+        MarkDuplicates(
+            _raw_bam
+        )
+        CNVKitSingle(
+             MarkDuplicates.out,
             _fasta,
             _fasta_fai,
-            _target_bed
-    )
-
+            _cnvkit_ref
+        )
         MantaSingle(
-            _bam_recal,
+            MarkDuplicates.out,
             _fasta,
             _fasta_fai,
             _target_bed
         )
 
         TIDDIT(
-            _bam_recal,
+            MarkDuplicates.out,
              _fasta,
-            _fasta_fai,
+            _fasta_fai
         )
 } // end of wf_germline_cnv
 
@@ -1273,6 +1288,32 @@ workflow wf_savvy_somatic_cnv{
     SavvyCNVCoverageSummary(_md_bam)
     SavvyCNV(SavvyCNVCoverageSummary.out.collect())
 } // end of wf_germline_cnv
+
+workflow wf_cnvkit_cnv{
+    take: _md_bam_collected
+    take: _fasta
+    take: _target_bed
+    main:
+     /* CNVKit Somatic Copy Number related calls */
+    /* Starting point is duplicated marked bams from MarkDuplicates.out.marked_bams with the following structure */
+    /* MarkDuplicates.out.marked_bams => [idPatient, idSample, md.bam, md.bam.bai]*/
+        CNVKitSingle(
+            _md_bam_collected,
+            _fasta,
+            _target_bed)
+} // end of wf_germline_cnv
+
+// workflow wf_tiddit_gm_sv{
+//     take: _md_bam
+//     take: _fasta
+//     take: _fasta_fai
+//     main:
+//         TIDDIT(
+//             _md_bam,
+//             _fasta,
+//             _fasta_fai
+//         )
+// } // end of wf_germline_cnv
 
 workflow wf_annotate{
     // to do
@@ -1436,6 +1477,7 @@ workflow{
     
     // FastQCFQ(ch_input_sample)     
     ch_unmarked_bams = Channel.empty()
+    ch_fastqc_report = Channel.empty()
     // ch_unmarked_bams_qc_reports = Channel.empty()
     if (step == 'mapping'){
         wf_fastqc_fq(ch_input_sample)
@@ -1444,9 +1486,12 @@ workflow{
                     ch_fasta_fai,
                     ch_bwa_index
         )
-        ch_unmarked_bams = wf_map_reads.out.bams_mapped       
+        ch_unmarked_bams = wf_map_reads.out.bams_mapped
+        ch_fastqc_report = wf_fastqc_fq.out.fastqc_reports.collect()
     }
     // QC raw bams
+    ch_bam_qc_mapped = Channel.empty()
+    
     wf_qc_bam_mapped(ch_unmarked_bams,
                         ch_target_bed)
     
@@ -1681,21 +1726,21 @@ d) recalibrated bams
         ch_dbsnp_index
     )
 
-    // wf_hap_py(
-    //     wf_deepvariant.out.vcf,
-    //     wf_genotype_gvcf.out.vcfs_with_indexes,
-    //     ch_target_bed,
-    //     ch_bait_bed,
-    //       ch_fasta,
-    //     ch_fasta_fai
-    // )
+    // Only run the germline_cnv if it's exclusively asked by one of the tools
+
+    if (    ('cnvkit_single' in tools) || 
+            ('manta_single' in tools) || 
+            ('tiddit' in tools)
+        ){
+            wf_germline_cnv(
+            ch_bams,
+            ch_target_bed,
+            ch_fasta,
+            ch_fasta_fai,
+            ch_cnvkit_ref
+            )
+        }
     
-    wf_germline_cnv(
-        ch_bams,
-        ch_target_bed,
-        ch_fasta,
-        ch_fasta_fai
-    )
 
     wf_gatk_somatic_cnv (
         // wf_mark_duplicates.out.dm_bams,
@@ -1709,13 +1754,26 @@ d) recalibrated bams
 
     // wf_savvy_somatic_cnv(wf_mark_duplicates.out.dm_bams)
     wf_savvy_somatic_cnv(ch_bams)
+    
+    // wf_cnvkit_cnv(
+    //     ch_bams.collect(),
+    //     ch_fasta,
+    //     ch_target_bed
+    //     )
+    
+    // wf_tiddit_gm_sv(
+    //     ch_bams,
+    //     ch_fasta,
+    //     ch_fasta_fai
+    //     )
+
     wf_vcf_stats(wf_deepvariant.out.vcf,
         wf_genotype_gvcf.out.vcfs_with_indexes
         )
 
     wf_multiqc(
         wf_get_software_versions.out,
-        wf_fastqc_fq.out.fastqc_reports.collect().ifEmpty([]),
+        ch_fastqc_report,
         wf_qc_bam_mapped.out.bam_qc,
         wf_qc_bam_recal.out.samtools_stats,
         wf_qc_bam_recal.out.alignment_summary_metrics,
@@ -1901,6 +1959,7 @@ process GetSoftwareVersions {
 
     script:
     """
+    init.sh
     bcftools version > v_bcftools.txt 2>&1 || true
     bwa &> v_bwa.txt 2>&1 || true
     configManta.py --version > v_manta.txt 2>&1 || true
@@ -1943,6 +2002,7 @@ process BuildFastaGz {
       when: !(params.fasta_gz)
       script:
       """
+      init.sh
       bgzip -c ${fasta} > ${fasta}.gz
       """
 }
@@ -1960,6 +2020,7 @@ process BuildFastaGzFai {
     when: !(params.fasta_gz_fai)
     script:
     """
+    init.sh
     samtools faidx $fastagz
     """
   }
@@ -1978,6 +2039,7 @@ process BuildFastaGzi {
 
     script:
     """
+    init.sh
     bgzip -c -i ${fasta} > ${fasta}.gz
     """
   }
@@ -1998,6 +2060,7 @@ process BuildBWAindexes {
 
     script:
     """
+    init.sh
     bwa index ${fasta}
     """
 }
@@ -2020,6 +2083,7 @@ process BuildDict {
 
     script:
     """
+    init.sh
     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
         CreateSequenceDictionary \
         --REFERENCE ${fasta} \
@@ -2045,6 +2109,7 @@ process BuildFastaFai {
 
     script:
     """
+    init.sh
     samtools faidx ${fasta}
     """
 }
@@ -2067,6 +2132,7 @@ process BuildDbsnpIndex {
 
     script:
     """
+    init.sh
     tabix -p vcf ${dbsnp}
     """
 }
@@ -2088,6 +2154,7 @@ process BuildGermlineResourceIndex {
 
     script:
     """
+    init.sh
     tabix -p vcf ${germlineResource}
     """
 }
@@ -2108,6 +2175,7 @@ process BuildKnownIndelsIndex {
 
     script:
     """
+    init.sh
     tabix -p vcf ${knownIndels}
     """
 }
@@ -2129,6 +2197,7 @@ process BuildSomaticPonIndex {
 
     script:
     """
+    init.sh
     tabix -p vcf ${pon}
     """
 }
@@ -2156,6 +2225,7 @@ process BuildIntervals {
 
   script:
   """
+  init.sh
   awk -v FS='\t' -v OFS='\t' '{ print \$1, \"0\", \$2 }' ${fastaFai} > ${fastaFai.baseName}.bed
   """
 }
@@ -2176,6 +2246,7 @@ process CreateIntervalBeds {
     // contain runtime estimates, which is then used to combine short-running jobs
     if (hasExtension(intervals, "bed"))
         """
+        init.sh
         awk -vFS="\t" '{
           t = \$5  # runtime estimate
           if (t == "") {
@@ -2196,6 +2267,7 @@ process CreateIntervalBeds {
         """
     else if (hasExtension(intervals, "interval_list"))
         """
+        init.sh
         grep -v '^@' ${intervals} | awk -vFS="\t" '{
           name = sprintf("%s_%d-%d", \$1, \$2, \$3);
           printf("%s\\t%d\\t%d\\n", \$1, \$2-1, \$3) > name ".bed"
@@ -2203,6 +2275,7 @@ process CreateIntervalBeds {
         """
     else
         """
+        init.sh
         awk -vFS="[:-]" '{
           name = sprintf("%s_%d-%d", \$1, \$2, \$3);
           printf("%s\\t%d\\t%d\\n", \$1, \$2-1, \$3) > name ".bed"
@@ -2232,6 +2305,7 @@ process PartitionFastQ {
     
     script:
     """
+    init.sh
     partition.sh \
                 in=${idSample}_${idRun}_R1.fastq.gz \
                 in2=${idSample}_${idRun}_R2.fastq.gz  \
@@ -2262,6 +2336,7 @@ process FastQCFQ {
     
     script:
     """
+    init.sh
     fastqc -t 2 -q ${idSample}_${idRun}_R1.fastq.gz ${idSample}_${idRun}_R2.fastq.gz
     """
 }
@@ -2301,6 +2376,7 @@ process MapReads {
     convertToFastq = hasExtension(inputFile1, "bam") ? "gatk --java-options -Xmx${task.memory.toGiga()}g SamToFastq --INPUT=${inputFile1} --FASTQ=/dev/stdout --INTERLEAVE=true --NON_PF=true | \\" : ""
     input = hasExtension(inputFile1, "bam") ? "-p /dev/stdin - 2> >(tee ${inputFile1}.bwa.stderr.log >&2)" : "${inputFile1} ${inputFile2}"
     """
+        init.sh
         ${convertToFastq}
         bwa mem -K 100000000 -R \"${readGroup}\" ${extra} -t ${task.cpus} -M ${fasta} \
         ${input} | \
@@ -2324,6 +2400,7 @@ process FilterBamRead1 {
     script:
     if( params.remove_supplementary_reads)
         """
+        init.sh
         sambamba view -t ${task.cpus} -h \
             -F "(first_of_pair and mapping_quality >=${params.bam_mapping_q} \
                 and not ([XA] != null or [SA] != null)) \
@@ -2336,6 +2413,7 @@ process FilterBamRead1 {
 
     else
         """
+        init.sh
         sambamba view -t ${task.cpus} -h \
             -F "(first_of_pair and mapping_quality >=${params.bam_mapping_q}) \
                 or second_of_pair" \
@@ -2361,6 +2439,7 @@ process FilterBamRead2 {
     script:
     if( params.remove_supplementary_reads)
         """
+        init.sh
         sambamba view -t ${task.cpus} -h \
             -F "(second_of_pair and mapping_quality >=${params.bam_mapping_q} \
                 and not ([XA] != null or [SA] != null)) \
@@ -2372,6 +2451,7 @@ process FilterBamRead2 {
         """
     else
         """
+        init.sh
         sambamba view -t ${task.cpus} -h \
             -F "(second_of_pair and mapping_quality >=${params.bam_mapping_q}) \
                 or first_of_pair" \
@@ -2399,6 +2479,7 @@ process MergeFilteredBamReads {
     // bn = file(out_bam).baseName
     // out_bai = "${bn}.bai"
     """
+    init.sh
     samtools merge --threads ${task.cpus} -n -c -p merged.bam ${partial_filtered_bams}
     samtools sort --threads ${task.cpus} merged.bam -o ${idSample}_${idRun}_filtered.bam
     #samtools index  --threads ${task.cpus} ${idSample}_${idRun}_filtered.bam
@@ -2415,7 +2496,7 @@ process FilterOutSecondaryAndSupplementaryReads {
         tuple idPatient, idSample, idRun,  file("${idSample}_${idRun}_filtered.bam"), file(bai)
 
     output:
-        tuple idPatient, idSample, idRun, file(out_bam),  emit: filtered_bam
+        tuple idPatient, idSample, idRun, file(out_bam),  emit: filtered_bam_mapped
 
     when: (params.filter_bams)
 
@@ -2423,6 +2504,9 @@ process FilterOutSecondaryAndSupplementaryReads {
     out_bam = "${idSample}_${idRun}_pq${params.bam_mapping_q}.bam"
     bn = file(out_bam).baseName
     out_bai = "${bn}.bai"
+    // simg = myDir = file('/scratch/Shares/layer/singularity/llab.sif')
+    // simg.copyTo('/tmp/llab.sif')
+
     """
     #!/usr/bin/env python
     import pysam
@@ -2473,6 +2557,7 @@ process MergeBamMapped {
     // suffix = bams.first().minus("${idSample}_${idRun}")
     // out_file = "${idSample}${suffix}"
     """
+    init.sh
     samtools merge --threads ${task.cpus} "${idSample}${out_suffix}.bam" ${bams}
     """
 }
@@ -2493,6 +2578,7 @@ process IndexBamFile {
 
     script:
     """
+    init.sh
     samtools index ${bam}
     mv ${bam}.bai ${bam.baseName}.bai
     """
@@ -2578,10 +2664,11 @@ process MarkDuplicates {
         tuple idPatient, idSample, file("${idSample}.md.bam"), file("${idSample}.md.bai"), emit: marked_bams
         // file ("${idSample}.bam.metrics")
 
-    when: !(step in ['recalibrate', 'variantcalling', 'annotate'])
+    // when: !(step in ['recalibrate', 'variantcalling', 'annotate'])
 
     script:
     """
+    init.sh
     samtools sort -n --threads ${task.cpus}  -O SAM  ${idSample}.bam | \
         samblaster -M --ignoreUnmated| \
         samtools sort --threads ${task.cpus}  -O BAM > ${idSample}.md.bam
@@ -2627,11 +2714,11 @@ process BaseRecalibrator {
     // intervalsOptions = ""
     // TODO: --use-original-qualities ???
     """
+    init.sh
     gatk --java-options -Xmx${task.memory.toGiga()}g \
         BaseRecalibrator \
         -I ${bam} \
         -O ${prefix}${idSample}.recal.table \
-        --tmp-dir /tmp \
         -R ${fasta} \
         ${intervalsOptions} \
         ${dbsnpOptions} \
@@ -2666,6 +2753,7 @@ process GatherBQSRReports {
     script:
     input = recal.collect{"-I ${it}"}.join(' ')
     """
+    init.sh
     gatk --java-options -Xmx${task.memory.toGiga()}g \
         GatherBQSRReports \
         ${input} \
@@ -2702,6 +2790,7 @@ process ApplyBQSR {
     prefix = params.no_intervals ? "" : "${intervalBed.baseName}_"
     intervalsOptions = params.no_intervals ? "" : "-L ${intervalBed}"
     """
+    init.sh
     gatk --java-options -Xmx${task.memory.toGiga()}g \
         ApplyBQSR \
         -R ${fasta} \
@@ -2733,6 +2822,7 @@ process MergeBamRecal {
 
     script:
     """
+    init.sh
     samtools merge --threads ${task.cpus} ${idSample}.recal.bam ${bam}
     samtools index ${idSample}.recal.bam
     mv ${idSample}.recal.bam.bai ${idSample}.recal.bai
@@ -2758,6 +2848,7 @@ process BamRecalOnTarget {
 
     script:
     """
+    init.sh
     bedtools intersect -a ${idSample}.recal.bam -b ${paddedTargetBed} > ${idSample}.recal.on_target.bam
     samtools index ${idSample}.recal.on_target.bam
     mv ${idSample}.recal.on_target.bam.bai ${idSample}.recal.on_target.bai
@@ -2784,6 +2875,7 @@ process IndexBamRecal {
 
     script:
     """
+    init.sh
     samtools index ${idSample}.recal.bam
     """
 }
@@ -2809,6 +2901,7 @@ process SamtoolsStats {
 
     script:
     """
+    init.sh
     samtools stats ${bam} > ${bam}.samtools.stats.out
     """
 }
@@ -2835,6 +2928,7 @@ process BamQC {
     script:
     use_bed = params.target_bed ? "-gff ${targetBED}" : ''
     """
+    init.sh
     qualimap --java-mem-size=${task.memory.toGiga()}G \
         bamqc \
         -bam ${bam} \
@@ -2868,6 +2962,7 @@ process CollectAlignmentSummaryMetrics{
     
     script:
     """
+    init.sh
     gatk --java-options -Xmx32G CollectAlignmentSummaryMetrics --VALIDATION_STRINGENCY LENIENT \
     -I ${bam} \
     -O ${bam.baseName}_alignment_metrics.txt \
@@ -2893,6 +2988,7 @@ process CollectInsertSizeMetrics{
 
     script:
     """
+    init.sh
     gatk --java-options -Xmx32G CollectInsertSizeMetrics --VALIDATION_STRINGENCY LENIENT \
     -I ${bam} \
     -O ${bam.baseName}_insert_size_metrics.txt \
@@ -2924,6 +3020,7 @@ process CollectHsMetrics{
     when: !('hs_metrics' in skipQC) && params.bait_bed
     script:
     """
+    init.sh
     gatk BedToIntervalList -I ${targetBED} -O target.interval_list -SD ${dict}
     gatk BedToIntervalList -I ${baitBED} -O bait.interval_list -SD ${dict}
 
@@ -2972,6 +3069,7 @@ process HaplotypeCaller {
 
     script:
     """
+    init.sh
     gatk --java-options "-Xmx${task.memory.toGiga()}g -Xms6000m -XX:GCTimeLimit=50 -XX:GCHeapFreeLimit=10" \
         HaplotypeCaller \
         -R ${fasta} \
@@ -3042,6 +3140,7 @@ process IndividuallyGentoypeGVCF{
     // in_file= "${gvcf.fileName}" - ".gz"
     out_file="${prefix}.vcf"
     """
+    init.sh
     bgzip  ${gvcf}
     tabix  ${gvcf}.gz
     gatk --java-options -Xmx${task.memory.toGiga()}g \
@@ -3075,6 +3174,7 @@ process GenomicsDBImport {
     interval_name_with_underscore="${interval_name}_"
     // gDB = chr
     """
+    init.sh
     for x in *.g.vcf
     do
         bgzip \$x
@@ -3124,6 +3224,7 @@ process GenotypeGVCFs {
     script:
     // Using -L is important for speed and we have to index the interval files also
     """
+    init.sh
     gatk --java-options -Xmx${task.memory.toGiga()}g \
         GenotypeGVCFs \
         -R ${fasta} \
@@ -3155,6 +3256,7 @@ process SelectVariants {
     script:
     // Using -L is important for speed and we have to index the interval files also
     """
+    init.sh
     gatk --java-options -Xmx${task.memory.toGiga()}g \
             SelectVariants \
             -R ${fasta} \
@@ -3194,6 +3296,7 @@ process ConcatVCF {
     outFile =  "${output_file_prefix}_${idSample}.${output_file_ext}"
     options = params.target_bed ? "-t ${targetBED}" : ""
     """
+    init.sh
     concatenateVCFs.sh -i ${fastaFai} -c ${task.cpus} -o ${outFile} ${options}
     """
 }
@@ -3223,6 +3326,7 @@ process CohortConcatVCF {
     script:
     options = params.target_bed ? "-t ${targetBED}" : ""
     """
+    init.sh
     concatenateVCFs.sh -i ${fastaFai} -c ${task.cpus} -o HC_cohort.vcf ${options}
     """
 }
@@ -3261,6 +3365,7 @@ process HapPy {
     script:
     // bn = "{vcf.baseName}"
     """
+    init.sh
     export HGREF=$fasta
     mkdir scratch
     hap.py  \
@@ -3451,6 +3556,7 @@ process Mpileup {
     prefix = params.no_intervals ? "" : "${intervalBed.baseName}_"
     intervalsOptions = params.no_intervals ? "" : "-l ${intervalBed}"
     """
+    init.sh
     samtools mpileup \
         -f ${fasta} ${bam} \
         ${intervalsOptions} \
@@ -3476,6 +3582,7 @@ process MergeMpileup {
 
     script:
     """
+    init.sh
     for i in `ls -1v *.pileup.gz`;
         do zcat \$i >> ${idSample}.pileup
     done
@@ -3491,7 +3598,7 @@ process MergeMpileup {
 
 process StrelkaSingle {
     label 'cpus_max'
-    label 'memory_max'
+    // label 'memory_max'
 
     tag {idSample}
 
@@ -3512,6 +3619,7 @@ process StrelkaSingle {
     beforeScript = params.target_bed ? "bgzip --threads ${task.cpus} -c ${targetBED} > call_targets.bed.gz ; tabix call_targets.bed.gz" : ""
     options = params.target_bed ? "--exome --callRegions call_targets.bed.gz" : ""
     """
+    init.sh
     ${beforeScript}
     configureStrelkaGermlineWorkflow.py \
         --bam ${bam} \
@@ -3536,8 +3644,8 @@ process StrelkaSingle {
 // STEP MANTA.1 - SINGLE MODE
 
 process MantaSingle {
-    label 'cpus_max'
-    label 'memory_max'
+    label 'cpus_32'
+    // label 'memory_max'
 
     tag {idSample}
 
@@ -3645,6 +3753,7 @@ process BcftoolsStats {
 
     script:
     """
+    init.sh
     bcftools stats ${vcf} > ${reduceVCF(vcf.fileName)}.bcf.tools.stats.out
     """
 }
@@ -3667,6 +3776,7 @@ process Vcftools {
 
     script:
     """
+    init.sh
     vcftools \
     --gzvcf ${vcf} \
     --TsTv-by-count \
@@ -3720,6 +3830,7 @@ process SnpEff {
     cache = (params.snpEff_cache && params.annotation_cache) ? "-dataDir \${PWD}/${dataDir}" : ""
     // cache = (params.snpeff_cache && params.annotation_cache) ? "-dataDir ${dataDir}" : ""
     """
+    init.sh
     snpEff -Xmx${task.memory.toGiga()}g \
         ${snpeffDb} \
         -csvStats ${reducedVCF}_snpEff.csv \
@@ -3752,6 +3863,7 @@ process CompressVCFsnpEff {
 
     script:
     """
+    init.sh
     bgzip < ${vcf} > ${vcf}.gz
     tabix ${vcf}.gz
     """
@@ -3797,6 +3909,7 @@ process VEP {
     cadd = (params.cadd_WG_SNVs && params.cadd_InDels) ? "--plugin CADD,whole_genome_SNVs.tsv.gz,InDels.tsv.gz" : ""
     genesplicer = params.genesplicer ? "--plugin GeneSplicer,/opt/miniconda/envs/layer_lab_dna_seq/bin/genesplicer,/opt/miniconda/envs/layer_lab_dna_seq/share/genesplicer-1.0-1/human,context=200,tmpdir=\$PWD/${reducedVCF}" : "--offline"
     """
+    init.sh
     mkdir ${reducedVCF}
 
     vep \
@@ -3862,6 +3975,7 @@ process VEPmerge {
     cadd = (params.cadd_WG_SNVs && params.cadd_InDels) ? "--plugin CADD,whole_genome_SNVs.tsv.gz,InDels.tsv.gz" : ""
     genesplicer = params.genesplicer ? "--plugin GeneSplicer,/opt/miniconda/envs/layer_lab_dna_seq/bin/genesplicer,/opt/miniconda/envs/layer_lab_dna_seq/share/genesplicer-1.0-1/human,context=200,tmpdir=\$PWD/${reducedVCF}" : "--offline"
     """
+    init.sh
     mkdir ${reducedVCF}
 
     vep \
@@ -3905,6 +4019,7 @@ process CompressVCFvep {
 
     script:
     """
+    init.sh
     bgzip < ${vcf} > ${vcf}.gz
     tabix ${vcf}.gz
     """
@@ -3942,7 +4057,7 @@ process Mutect2Single{
     # max-mnp-distance is set to 0 to avoid a bug in 
     # next process GenomicsDbImport
     # See https://gatk.broadinstitute.org/hc/en-us/articles/360046224491-CreateSomaticPanelOfNormals-BETA-
-    
+    init.sh
     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
       Mutect2 \
       -R ${fasta} \
@@ -3971,6 +4086,7 @@ process MergeMutect2SingleStats {
     script:     
       stats = statsFiles.collect{ "-stats ${it} " }.join(' ')
     """
+    init.sh
     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
         MergeMutectStats \
         ${stats} \
@@ -4010,6 +4126,7 @@ process FilterMutect2SingleCalls {
 
     script:
     """
+    init.sh
     # do the actual filtering
     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
         FilterMutectCalls \
@@ -4041,6 +4158,7 @@ process SomaticPonGenomicsDBImport {
     
     // gDB = chr
     """
+    init.sh
     vcfs=' '
     for x in `ls vcfs/*.vcf.gz`
     do
@@ -4084,6 +4202,7 @@ process CreateSomaticPON{
     pon_db = "gendb://${pon}"
     
     """
+    init.sh
      gatk --java-options -Xmx${task.memory.toGiga()}g \
      CreateSomaticPanelOfNormals -R ${fasta} \
      --germline-resource ${germlineResource} \
@@ -4134,6 +4253,7 @@ process Mutect2TN{
     PON = params.pon_somatic ? "--panel-of-normals ${ponSomatic}" : ""
     // PON =  ""
     """
+    init.sh
     # Get raw calls
     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
       Mutect2 \
@@ -4169,6 +4289,7 @@ process MergeMutect2TNStats {
     script:     
       stats = statsFiles.collect{ "-stats ${it} " }.join(' ')
     """
+    init.sh
     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
         MergeMutectStats \
         ${stats} \
@@ -4306,6 +4427,7 @@ process FilterMutect2TNCalls {
 
     script:
     """
+    init.sh
     # do the actual filtering
     gatk --java-options "-Xmx${task.memory.toGiga()}g" \
         FilterMutectCalls \
@@ -4345,6 +4467,7 @@ process PreprocessIntervals {
     bin_options =  params.no_intervals ? "--bin-length 1000" : "--bin-length 0"
 
     """
+    init.sh
     gatk PreprocessIntervals \
         ${intervals_options} \
         ${padding_options} \
@@ -4370,6 +4493,7 @@ process CollectReadCounts {
 
     script:
     """
+    init.sh
     gatk CollectReadCounts \
         -I ${bam} \
         -L ${preprocessed_intervals} \
@@ -4406,6 +4530,7 @@ process CreateReadCountPon {
 
     
     """
+    init.sh
     gatk CreateReadCountPanelOfNormals \
         $params_str \
         -O $out_file
@@ -4432,7 +4557,7 @@ process DenoiseReadCounts {
     denoised_copy_ratio = "${idSample}.denoisedCR.tsv"
     pon_option = params.read_count_pon ? "--count-panel-of-normals ${read_count_somatic_pon}" : ""
     """
-    
+    init.sh
     gatk DenoiseReadCounts \
         -I ${idSample}.counts.hdf5 \
         ${pon_option} \
@@ -4460,6 +4585,7 @@ process PlotDenoisedCopyRatios {
     out_dir = "PlotDenoisedReadCounts" 
 
     """
+    init.sh
     mkdir ${out_dir}
     gatk PlotDenoisedCopyRatios \
         --standardized-copy-ratios ${std_copy_ratio} \
@@ -4488,6 +4614,7 @@ process ModelSegments {
     out_dir = "ModeledSegments"
 
     """
+    init.sh
     mkdir $out_dir
     gatk ModelSegments \
         --denoised-copy-ratios ${denoised_copy_ratio} \
@@ -4513,6 +4640,7 @@ process PlotModeledSegments {
     out_dir = "PlotsModeledSegments"
     
     """
+    init.sh
     mkdir $out_dir
     gatk PlotModeledSegments \
         --denoised-copy-ratios ${idSample}.denoisedCR.tsv \
@@ -4539,6 +4667,7 @@ process CallCopyRatioSegments {
     script:
     
     """
+    init.sh
     gatk CallCopyRatioSegments \
         -I ${idSample}.cr.seg \
         -O ${idSample}.called.seg
@@ -4564,6 +4693,7 @@ process SavvyCNVCoverageSummary {
     script:
     
     """
+    init.sh
     java -Xmx1g CoverageBinner ${bam} > ${idSample}.coverageBinner
     """
 }
@@ -4585,6 +4715,7 @@ process SavvyCNV {
     chunk_size = 200000
     
     """
+    init.sh
     mkdir -p SavvycnvResults/SavvycnvCoverageSummary
     mkdir  SavvycnvResults/pdfs
     java -Xmx30g SavvyCNV -a -d ${chunk_size} *.coverageBinner > cnv_list.csv 2>log_messages.txt
@@ -4594,6 +4725,34 @@ process SavvyCNV {
     """
 }
 
+/* CNVKit related processes */
+// CNVKIT related
+process CNVKitSingle{
+    label 'cpus_8'
+    publishDir "${params.outdir}/VariantCalling/${idSample}/CNVKit", mode: params.publish_dir_mode
+    
+    input:
+        tuple idPatient, idSample, file(bam), file(bai)
+        file(fasta)
+        file(fastaFai)
+        file(cnvkit_ref)
+        // file(targetBED)
+    
+    output:
+    tuple val("cnvkit_single"), idPatient, idSample, file("*")
+
+    when: params.cnvkit_ref && 'cnvkit_single' in tools
+
+    script:
+    
+    """
+    init.sh
+    cnvkit.py batch ${bam} \
+        --reference ${cnvkit_ref} \
+        --scatter \
+        --diagram
+    """
+}
 /*
 ================================================================================
                                      MultiQC
@@ -4655,6 +4814,7 @@ def printSummary(){
     if (step)                       summary['Step']              = step
     if (params.tools)               summary['Tools']             = tools.join(', ')
     if (params.skip_qc)              summary['QC tools skip']     = skipQC.join(', ')
+    if (params.filter_bams)              summary['params.filter_bams']     = params.filter_bams
 
     if (params.no_intervals && step != 'annotate') summary['Intervals']         = 'Do not use'
     if ('haplotypecaller' in tools)                summary['GVCF']              = params.no_gvcf ? 'No' : 'Yes'
@@ -4836,6 +4996,8 @@ def defineToolList() {
         'mpileup',
         'gatkcnv',
         'savvycnv',
+        'cnvkit',
+        'cnvkit_single',
         'mutect2',
         'mutect2_single',
         'gen_somatic_pon',
